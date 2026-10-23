@@ -19,12 +19,15 @@ The project is backend only; Swagger serves as the UI.
 
 ## Tech stack
 
-TypeScript · Node.js · NestJS · PostgreSQL + TypeORM (migrations) · Redis + BullMQ ·
+TypeScript (strict) · Node.js · NestJS · PostgreSQL + TypeORM (migrations) · Redis + BullMQ ·
 JWT (passport-jwt) · class-validator · Swagger/OpenAPI · Jest + Supertest · Docker Compose
 
 ## Getting started
 
-> To be completed once the project is scaffolded.
+Requires Node.js 20+ and Docker.
+
+> `npm run migration:run` and `npm run seed` are placeholders that only print a message until the
+> database and auth tasks add migrations and seed data.
 
 ```bash
 cp .env.example .env          # then fill in local values
@@ -32,7 +35,7 @@ docker compose up -d          # postgres + redis
 npm install
 npm run migration:run
 npm run seed                  # fake users for each role
-npm run start:dev             # API on :3000, Swagger at /docs
+npm run start:dev             # API on :3000
 ```
 
 ## Testing
