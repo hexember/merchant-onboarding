@@ -1,0 +1,49 @@
+# Developer Specific
+dev.notes/
+
+# Secrets / environment (only .env.example is committed)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Test & coverage
+coverage/
+.nyc_output/
+junit.xml
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local Docker volumes / data
+.docker-data/
+postgres-data/
+redis-data/
+
+# IDE / editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code: personal, machine-local settings (shared settings.json is committed)
+.claude/settings.local.json
