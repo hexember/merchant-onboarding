@@ -42,6 +42,24 @@ npm run test                  # unit tests
 npm run test:e2e              # integration tests (needs docker services)
 ```
 
+## AI-assisted workflow
+
+Run `/ship <task>` in Claude Code to take one task from plan to draft PR:
+
+1. **planner** writes a plan to `docs/plans/<slug>.md`, citing the ADRs, and splits it into
+   work packages that touch separate files.
+2. **plan-reviewer** checks the plan against `docs/adrs/` and `.claude/rules/`
+   (APPROVED / CHANGES_REQUESTED / NEEDS_HUMAN; up to 3 revision rounds).
+3. **implementer** subagents write the code and tests, one per package; packages with no
+   dependency between them run in parallel.
+4. `/verify` runs on the combined change, with **security-reviewer** alongside it for auth,
+   query, logging or seed changes.
+5. The change is committed on a new branch `ai/<slug>-<timestamp>` (every run gets its own, cut from `origin/main`), pushed, and opened as a **draft** PR.
+
+The pipeline stops and asks a person when the tree is dirty, the plan conflicts with an ADR, the
+review doesn't converge, or the quality gate keeps failing. It never merges or pushes to `main`.
+Requires an authenticated `gh` CLI.
+
 ## Design & decisions
 
 Design decisions live in [docs/adrs/](docs/adrs/):

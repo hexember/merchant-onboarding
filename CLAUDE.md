@@ -7,5 +7,4 @@ general rules always apply, the others load for matching paths.
 
 - If a change conflicts with an ADR in `docs/adrs/`, flag it first. Update that ADR in the same change.
 - Run `/verify` before calling anything done. Report failures honestly.
-- After meaningful AI-assisted work, run `/log-ai-usage`.
-- Don't commit or push unless asked.
+- Don't commit or push unless asked. Running `/ship <task>` counts as asking for that task.
