@@ -60,14 +60,16 @@ export interface ApplicationPage {
  * all rows, and any other role nothing. Out of scope and unknown ids both come back as `null`, so
  * the caller answers 404 for both. There is deliberately no unscoped find-by-id.
  *
- * There are two conditional updates: `updateIfEditable` (PATCH) and `submitIfAllowed` (SUBMIT).
- * Each must only be called with an id that `findAccessible` returned in the same transaction; its
- * `version` condition then guarantees the row is still the one that passed the scope check. Both
- * bump `version`, and as defence in depth both repeat the actor's scope, built by the same
+ * There are four conditional updates: `updateIfEditable` (PATCH), `submitIfAllowed` (SUBMIT),
+ * `assignReviewerIfAllowed` (ASSIGN) and `transferOwnerIfAllowed` (TRANSFER_OWNER). Each must only
+ * be called with an id that `findAccessible` returned in the same transaction; its `version`
+ * condition then guarantees the row is still the one that passed the scope check. All four bump
+ * `version`, and as defence in depth all four repeat the actor's scope, built by the same
  * `applyScope` as the reads, so the read and write rules cannot drift apart.
  *
  * Every write to an ownership or assignment column (`sales_owner_id`, `assigned_reviewer_id`)
- * must bump `version`, so a concurrent update's `version` condition sees the change.
+ * must bump `version`, so a concurrent update's `version` condition sees the change. Those writes
+ * are `assignReviewerIfAllowed` and `transferOwnerIfAllowed`.
  */
 @Injectable()
 export class ApplicationsRepository {
@@ -183,6 +185,66 @@ export class ApplicationsRepository {
       .andWhere('version = :expectedVersion', { expectedVersion })
       .andWhere('status IN (:...submittableStatuses)', {
         submittableStatuses: [...fromStatuses(TransitionAction.SUBMIT)],
+      });
+    // The UPDATE has no alias, so the scope uses bare column names.
+    const result = await this.applyScope(query, actor, '').execute();
+    return result.affected === 1;
+  }
+
+  /**
+   * The single ASSIGN write (docs/adrs/workflow.md §1.2): sets `assigned_reviewer_id` and bumps
+   * `version`. Applies only if the row still has `expectedVersion` and a status ASSIGN is allowed
+   * in, and repeats the actor's scope. Returns false when no row matched (changed concurrently).
+   * It touches no other column (not `status`, the KYB columns, `submission_count` or
+   * `created_by_id`). Only call it with an id `findAccessible` returned in the same transaction.
+   */
+  async assignReviewerIfAllowed(
+    id: string,
+    expectedVersion: number,
+    reviewerId: string,
+    actor: AuthUser,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const query = manager
+      .createQueryBuilder()
+      .update(MerchantApplication)
+      .set({
+        assignedReviewerId: reviewerId,
+        version: () => 'version + 1',
+        updatedAt: () => 'now()',
+      })
+      .where('id = :id', { id })
+      .andWhere('version = :expectedVersion', { expectedVersion })
+      .andWhere('status IN (:...assignableStatuses)', {
+        assignableStatuses: [...allowedStatuses(ApplicationOperation.ASSIGN)],
+      });
+    // The UPDATE has no alias, so the scope uses bare column names.
+    const result = await this.applyScope(query, actor, '').execute();
+    return result.affected === 1;
+  }
+
+  /**
+   * The single TRANSFER_OWNER write (docs/adrs/workflow.md §1.2): sets `sales_owner_id` and bumps
+   * `version`. Applies only if the row still has `expectedVersion` and a status TRANSFER_OWNER is
+   * allowed in, and repeats the actor's scope. Returns false when no row matched (changed
+   * concurrently). It touches no other column (not `status`, the KYB columns, `submission_count`
+   * or `created_by_id`). Only call it with an id `findAccessible` returned in the same transaction.
+   */
+  async transferOwnerIfAllowed(
+    id: string,
+    expectedVersion: number,
+    salesOwnerId: string,
+    actor: AuthUser,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const query = manager
+      .createQueryBuilder()
+      .update(MerchantApplication)
+      .set({ salesOwnerId, version: () => 'version + 1', updatedAt: () => 'now()' })
+      .where('id = :id', { id })
+      .andWhere('version = :expectedVersion', { expectedVersion })
+      .andWhere('status IN (:...transferableStatuses)', {
+        transferableStatuses: [...allowedStatuses(ApplicationOperation.TRANSFER_OWNER)],
       });
     // The UPDATE has no alias, so the scope uses bare column names.
     const result = await this.applyScope(query, actor, '').execute();

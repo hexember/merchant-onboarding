@@ -13,8 +13,11 @@ import {
   CONCURRENT_MODIFICATION_CODE,
   CONCURRENT_MODIFICATION_MESSAGE,
   INVALID_STATE_TRANSITION_CODE,
+  NOT_ASSIGNABLE_MESSAGE,
   NOT_EDITABLE_MESSAGE,
   NOT_SUBMITTABLE_MESSAGE,
+  NOT_TRANSFERABLE_MESSAGE,
+  REVIEWER_NOT_REVIEWER_MESSAGE,
   SALES_OWNER_NOT_SALES_MESSAGE,
   SALES_OWNER_REQUIRED_MESSAGE,
 } from '../src/applications/applications.service';
@@ -128,6 +131,34 @@ const NOT_SUBMITTABLE_BODY = {
   message: NOT_SUBMITTABLE_MESSAGE,
   code: INVALID_STATE_TRANSITION_CODE,
 };
+const NOT_ASSIGNABLE_BODY = {
+  statusCode: 409,
+  error: 'Conflict',
+  message: NOT_ASSIGNABLE_MESSAGE,
+  code: INVALID_STATE_TRANSITION_CODE,
+};
+const NOT_TRANSFERABLE_BODY = {
+  statusCode: 409,
+  error: 'Conflict',
+  message: NOT_TRANSFERABLE_MESSAGE,
+  code: INVALID_STATE_TRANSITION_CODE,
+};
+const CONCURRENT_MODIFICATION_BODY = {
+  statusCode: 409,
+  error: 'Conflict',
+  message: CONCURRENT_MODIFICATION_MESSAGE,
+  code: CONCURRENT_MODIFICATION_CODE,
+};
+const REVIEWER_NOT_REVIEWER_BODY = {
+  statusCode: 400,
+  error: 'Bad Request',
+  message: REVIEWER_NOT_REVIEWER_MESSAGE,
+};
+const SALES_OWNER_NOT_SALES_BODY = {
+  statusCode: 400,
+  error: 'Bad Request',
+  message: SALES_OWNER_NOT_SALES_MESSAGE,
+};
 
 interface ApplicationBody {
   id: string;
@@ -238,6 +269,7 @@ describe('Applications (e2e)', () => {
   let salesAId: string;
   let salesBId: string;
   let reviewerId: string;
+  let reviewer2Id: string;
   let adminId: string;
   let salesAToken: string;
   let salesBToken: string;
@@ -296,6 +328,7 @@ describe('Applications (e2e)', () => {
     salesAId = await userId(SALES_A_EMAIL);
     salesBId = await userId(SALES_B_EMAIL);
     reviewerId = await userId(REVIEWER_EMAIL);
+    reviewer2Id = await userId(REVIEWER_2_EMAIL);
     adminId = await userId(ADMIN_EMAIL);
 
     salesAToken = await loginToken(SALES_A_EMAIL, salesPassword);
@@ -385,14 +418,39 @@ describe('Applications (e2e)', () => {
     return track(await req);
   }
 
+  async function assign(
+    token: string | undefined,
+    id: string,
+    body: object,
+  ): Promise<request.Response> {
+    const req = request(server()).post(`/applications/${id}/assign`);
+    if (token !== undefined) {
+      req.set('Authorization', `Bearer ${token}`);
+    }
+    return track(await req.send(body));
+  }
+
+  async function transferOwner(
+    token: string | undefined,
+    id: string,
+    body: object,
+  ): Promise<request.Response> {
+    const req = request(server()).post(`/applications/${id}/transfer-owner`);
+    if (token !== undefined) {
+      req.set('Authorization', `Bearer ${token}`);
+    }
+    return track(await req.send(body));
+  }
+
   async function createAs(token: string, extra: object = {}): Promise<ApplicationBody> {
     const res = await post(token, { ...PAYLOAD, ...extra });
     expect(res.status).toBe(201);
     return res.body as ApplicationBody;
   }
 
-  // Test-only SQL: puts a row into a state the API cannot reach yet (no KYB worker, assign or
-  // decision endpoints), e.g. a finished KYB result before a resubmit.
+  // Test-only SQL: puts a row into a state the API cannot reach in this spec. The assign endpoint
+  // exists, but UNDER_REVIEW and the terminal statuses need the KYB worker (off here) or the
+  // decision endpoint (not built yet), e.g. a finished KYB result before a resubmit.
   async function forceState(id: string, state: ForcedState): Promise<void> {
     for (const [key, column] of FORCED_COLUMNS) {
       const value = state[key];
@@ -1234,6 +1292,492 @@ describe('Applications (e2e)', () => {
     });
   });
 
+  describe('POST /applications/:id/assign', () => {
+    async function auditsOf(action: string): Promise<AuditRow[]> {
+      return (await auditRows()).filter((row) => row.action === action);
+    }
+
+    it('ADMIN assigns in RISK_REVIEW (real submit): 200, masked, version +1, status and KYB unchanged, audited', async () => {
+      // Relies on the KYB worker being off in this spec (KybCheckProcessor uses autorun: false and
+      // test/setup/test-env.ts sets KYB_WORKER_ENABLED=false), so the row stays in RISK_REVIEW.
+      const a = await createAs(salesAToken);
+      expect((await submit(salesAToken, a.id)).status).toBe(200);
+      const before = await applicationRow(a.id);
+      expect(before).toMatchObject({ status: 'RISK_REVIEW', assigned_reviewer_id: null });
+
+      const res = await assign(adminToken, a.id, { reviewerId });
+
+      expect(res.status).toBe(200);
+      const body = res.body as ApplicationBody;
+      expectMasked(body);
+      expect(body).toMatchObject({
+        id: a.id,
+        assignedReviewerId: reviewerId,
+        salesOwnerId: salesAId,
+        status: 'RISK_REVIEW',
+      });
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        assigned_reviewer_id: reviewerId,
+        version: (before?.version ?? 0) + 1,
+        status: before?.status,
+        kyb_status: before?.kyb_status,
+        submission_count: before?.submission_count,
+      });
+      await expect(auditsOf('REVIEWER_ASSIGNED')).resolves.toEqual([
+        {
+          actor_type: 'USER',
+          actor_id: adminId,
+          actor_role: 'ADMIN',
+          action: 'REVIEWER_ASSIGNED',
+          entity_type: 'merchant_application',
+          entity_id: a.id,
+          meta: { from: null, to: reviewerId },
+        },
+      ]);
+    });
+
+    it.each(['UNDER_REVIEW', 'INFO_REQUESTED'])('ADMIN assigns in %s: 200', async (status) => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status });
+
+      const res = await assign(adminToken, a.id, { reviewerId });
+
+      expect(res.status).toBe(200);
+      expect((res.body as ApplicationBody).assignedReviewerId).toBe(reviewerId);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        status,
+        assigned_reviewer_id: reviewerId,
+        version: 2,
+      });
+    });
+
+    it('after assign, the assigned REVIEWER reads and lists it; reviewer-2 gets 404', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      expect((await assign(adminToken, a.id, { reviewerId })).status).toBe(200);
+
+      const detail = await get(reviewerToken, `/applications/${a.id}`);
+      expect(detail.status).toBe(200);
+      expectMasked(detail.body as ApplicationBody, DETAIL_RESPONSE_KEYS);
+      const list = (await get(reviewerToken, '/applications')).body as ListBody;
+      expect(list.items.map((item) => item.id)).toEqual([a.id]);
+
+      const other = await get(reviewer2Token, `/applications/${a.id}`);
+      expect(other.status).toBe(404);
+      expect(other.body).toEqual(NOT_FOUND_BODY);
+    });
+
+    it('reassign to reviewer-2: 200, audited from/to; the previous reviewer loses access at once', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      expect((await assign(adminToken, a.id, { reviewerId })).status).toBe(200);
+
+      const res = await assign(adminToken, a.id, { reviewerId: reviewer2Id });
+
+      expect(res.status).toBe(200);
+      expect((res.body as ApplicationBody).assignedReviewerId).toBe(reviewer2Id);
+      expect((await auditsOf('REVIEWER_ASSIGNED')).map((row) => row.meta)).toEqual([
+        { from: null, to: reviewerId },
+        { from: reviewerId, to: reviewer2Id },
+      ]);
+
+      const previous = await get(reviewerToken, `/applications/${a.id}`);
+      expect(previous.status).toBe(404);
+      expect(previous.body).toEqual(NOT_FOUND_BODY);
+      const previousList = (await get(reviewerToken, '/applications')).body as ListBody;
+      expect(previousList.items).toEqual([]);
+      expect((await get(reviewer2Token, `/applications/${a.id}`)).status).toBe(200);
+    });
+
+    it('the same reviewer again: 200, version bump and a second audit row with from === to', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      expect((await assign(adminToken, a.id, { reviewerId })).status).toBe(200);
+
+      const res = await assign(adminToken, a.id, { reviewerId });
+
+      expect(res.status).toBe(200);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        assigned_reviewer_id: reviewerId,
+        version: 3,
+      });
+      expect((await auditsOf('REVIEWER_ASSIGNED')).map((row) => row.meta)).toEqual([
+        { from: null, to: reviewerId },
+        { from: reviewerId, to: reviewerId },
+      ]);
+    });
+
+    it.each<[string, 'sales' | 'reviewer', (ids: { reviewer2: string }) => object]>([
+      ['SALES (the owner)', 'sales', (ids) => ({ reviewerId: ids.reviewer2 })],
+      ['SALES (the owner) with an invalid body', 'sales', () => ({ status: 'APPROVED' })],
+      ['REVIEWER (the assigned one)', 'reviewer', (ids) => ({ reviewerId: ids.reviewer2 })],
+    ])('denied: %s cannot assign → 403; row and audit unchanged', async (_l, who, body) => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW', assignedReviewerId: reviewerId });
+      const before = await applicationRow(a.id);
+      const auditsBefore = await auditRows();
+      const token = who === 'sales' ? salesAToken : reviewerToken;
+
+      const res = await assign(token, a.id, body({ reviewer2: reviewer2Id }));
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual(FORBIDDEN_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it('denied: no token gets 401; row and audit unchanged', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      const before = await applicationRow(a.id);
+      const auditsBefore = await auditRows();
+
+      const res = await assign(undefined, a.id, { reviewerId });
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(UNAUTHORIZED_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it.each<[string, (ids: { salesA: string; admin: string }) => string]>([
+      ["a SALES user's id", (ids) => ids.salesA],
+      ["the ADMIN's id", (ids) => ids.admin],
+      ['an unknown UUID', () => FAKE_UUID],
+      ["'not-a-uuid'", () => 'not-a-uuid'],
+    ])('denied: reviewerId as %s gets 400; row and audit unchanged', async (_l, target) => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      const before = await applicationRow(a.id);
+      const auditsBefore = await auditRows();
+
+      const res = await assign(adminToken, a.id, {
+        reviewerId: target({ salesA: salesAId, admin: adminId }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(REVIEWER_NOT_REVIEWER_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it.each<[string, (ids: { reviewer: string }) => object, string | undefined]>([
+      ['a missing reviewerId', () => ({}), undefined],
+      [
+        'an extra assignedReviewerId',
+        (ids) => ({ reviewerId: ids.reviewer, assignedReviewerId: ids.reviewer }),
+        'property assignedReviewerId should not exist',
+      ],
+      [
+        'an extra status',
+        (ids) => ({ reviewerId: ids.reviewer, status: 'APPROVED' }),
+        'property status should not exist',
+      ],
+      ['a numeric reviewerId', () => ({ reviewerId: 42 }), undefined],
+    ])('denied: %s gets 400 from validation; row and audit unchanged', async (_l, body, text) => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      const before = await applicationRow(a.id);
+      const auditsBefore = await auditRows();
+
+      const res = await assign(adminToken, a.id, body({ reviewer: reviewerId }));
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ statusCode: 400, error: 'Bad Request' });
+      if (text !== undefined) {
+        expect(JSON.stringify(res.body)).toContain(text);
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it('denied: an unknown or malformed application id gets the same 404', async () => {
+      const unknown = await assign(adminToken, FAKE_UUID, { reviewerId });
+      const malformed = await assign(adminToken, 'not-a-uuid', { reviewerId });
+
+      for (const res of [unknown, malformed]) {
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual(NOT_FOUND_BODY);
+      }
+      await expect(auditRows()).resolves.toEqual([]);
+    });
+
+    it.each(['DRAFT', 'APPROVED', 'REJECTED'])(
+      'denied: assigning in %s gets 409 INVALID_STATE_TRANSITION; row and audit unchanged',
+      async (status) => {
+        const a = await createAs(salesAToken);
+        await forceState(a.id, { status });
+        const before = await applicationRow(a.id);
+
+        const res = await assign(adminToken, a.id, { reviewerId });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual(NOT_ASSIGNABLE_BODY);
+        await expect(applicationRow(a.id)).resolves.toEqual(before);
+        expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+      },
+    );
+
+    it('denied: a lost race (version bumped between read and write) gets 409 CONCURRENT_MODIFICATION', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      const repo = app.get(ApplicationsRepository);
+      // Reference to the real method, taken before spying, so the mock does not call itself.
+      const real = repo.findAccessible.bind(repo);
+      const spy = jest
+        .spyOn(repo, 'findAccessible')
+        .mockImplementationOnce(async (id, actor, manager) => {
+          const found = await real(id, actor, manager);
+          // Separate pool connection; the SELECT above holds no row lock, so this does not block.
+          await dataSource.query(
+            'UPDATE merchant_applications SET version = version + 1 WHERE id = $1',
+            [id],
+          );
+          return found;
+        });
+      let res: request.Response;
+      try {
+        res = await assign(adminToken, a.id, { reviewerId });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(CONCURRENT_MODIFICATION_BODY);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        assigned_reviewer_id: null,
+        version: 2,
+      });
+      await expect(auditsOf('REVIEWER_ASSIGNED')).resolves.toEqual([]);
+    });
+  });
+
+  describe('POST /applications/:id/transfer-owner', () => {
+    async function auditsOf(action: string): Promise<AuditRow[]> {
+      return (await auditRows()).filter((row) => row.action === action);
+    }
+
+    it('ADMIN transfers A → B in DRAFT: 200, audited; A gets 404 everywhere, B has full access', async () => {
+      const a = await createAs(salesAToken);
+
+      const res = await transferOwner(adminToken, a.id, { salesOwnerId: salesBId });
+
+      expect(res.status).toBe(200);
+      const body = res.body as ApplicationBody;
+      expectMasked(body);
+      expect(body).toMatchObject({ id: a.id, salesOwnerId: salesBId, createdById: salesAId });
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        sales_owner_id: salesBId,
+        status: 'DRAFT',
+        version: 2,
+      });
+      await expect(auditsOf('OWNERSHIP_TRANSFERRED')).resolves.toEqual([
+        {
+          actor_type: 'USER',
+          actor_id: adminId,
+          actor_role: 'ADMIN',
+          action: 'OWNERSHIP_TRANSFERRED',
+          entity_type: 'merchant_application',
+          entity_id: a.id,
+          meta: { from: salesAId, to: salesBId },
+        },
+      ]);
+
+      // SALES A (the previous owner) gets the unknown-id 404 on every route and an empty list.
+      const deniedGet = await get(salesAToken, `/applications/${a.id}`);
+      const deniedPatch = await patch(salesAToken, a.id, { businessName: 'Changed by A' });
+      const deniedSubmit = await submit(salesAToken, a.id);
+      for (const denied of [deniedGet, deniedPatch, deniedSubmit]) {
+        expect(denied.status).toBe(404);
+        expect(denied.body).toEqual(NOT_FOUND_BODY);
+      }
+      const aList = (await get(salesAToken, '/applications')).body as ListBody;
+      expect(aList.items.map((item) => item.id)).not.toContain(a.id);
+
+      // SALES B (the new owner) reads, edits, lists and submits it.
+      expect((await get(salesBToken, `/applications/${a.id}`)).status).toBe(200);
+      expect((await patch(salesBToken, a.id, { businessName: 'Changed by B' })).status).toBe(200);
+      const bList = (await get(salesBToken, '/applications')).body as ListBody;
+      expect(bList.items.map((item) => item.id)).toContain(a.id);
+      expect((await submit(salesBToken, a.id)).status).toBe(200);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        business_name: 'Changed by B',
+        status: 'RISK_REVIEW',
+        sales_owner_id: salesBId,
+      });
+    });
+
+    it.each(['RISK_REVIEW', 'UNDER_REVIEW', 'INFO_REQUESTED'])(
+      'ADMIN transfers in %s: 200',
+      async (status) => {
+        const a = await createAs(salesAToken);
+        await forceState(a.id, { status });
+
+        const res = await transferOwner(adminToken, a.id, { salesOwnerId: salesBId });
+
+        expect(res.status).toBe(200);
+        await expect(applicationRow(a.id)).resolves.toMatchObject({
+          status,
+          sales_owner_id: salesBId,
+          version: 2,
+        });
+      },
+    );
+
+    it('transfer to the current owner: 200 and an audit row with from === to', async () => {
+      const a = await createAs(salesAToken);
+
+      const res = await transferOwner(adminToken, a.id, { salesOwnerId: salesAId });
+
+      expect(res.status).toBe(200);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        sales_owner_id: salesAId,
+        version: 2,
+      });
+      expect((await auditsOf('OWNERSHIP_TRANSFERRED')).map((row) => row.meta)).toEqual([
+        { from: salesAId, to: salesAId },
+      ]);
+    });
+
+    it.each<[string, 'sales' | 'reviewer', (ids: { a: string; b: string }) => string]>([
+      ['SALES (the owner) transferring to another SALES user', 'sales', (ids) => ids.b],
+      ['SALES (the owner) transferring to themselves', 'sales', (ids) => ids.a],
+      ['REVIEWER (the assigned one)', 'reviewer', (ids) => ids.b],
+    ])('denied: %s → 403; row and audit unchanged', async (_l, who, target) => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW', assignedReviewerId: reviewerId });
+      const before = await applicationRow(a.id);
+      const auditsBefore = await auditRows();
+      const token = who === 'sales' ? salesAToken : reviewerToken;
+
+      const res = await transferOwner(token, a.id, {
+        salesOwnerId: target({ a: salesAId, b: salesBId }),
+      });
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual(FORBIDDEN_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it('denied: no token gets 401; row and audit unchanged', async () => {
+      const a = await createAs(salesAToken);
+      const before = await applicationRow(a.id);
+
+      const res = await transferOwner(undefined, a.id, { salesOwnerId: salesBId });
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(UNAUTHORIZED_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+    });
+
+    it.each<[string, (ids: { reviewer: string; admin: string }) => string]>([
+      ["a REVIEWER's id", (ids) => ids.reviewer],
+      ["the ADMIN's own id", (ids) => ids.admin],
+      ['an unknown UUID', () => FAKE_UUID],
+      ["'not-a-uuid'", () => 'not-a-uuid'],
+    ])('denied: ADMIN cannot transfer to %s → 400; row and audit unchanged', async (_l, target) => {
+      const a = await createAs(salesAToken);
+      const before = await applicationRow(a.id);
+
+      const res = await transferOwner(adminToken, a.id, {
+        salesOwnerId: target({ reviewer: reviewerId, admin: adminId }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(SALES_OWNER_NOT_SALES_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+    });
+
+    it.each<[string, (ids: { b: string }) => object, string | undefined]>([
+      ['a missing salesOwnerId', () => ({}), undefined],
+      [
+        'an extra reviewerId',
+        (ids) => ({ salesOwnerId: ids.b, reviewerId: ids.b }),
+        'property reviewerId should not exist',
+      ],
+      [
+        'an extra createdById',
+        (ids) => ({ salesOwnerId: ids.b, createdById: ids.b }),
+        'property createdById should not exist',
+      ],
+    ])('denied: %s gets 400 from validation; row and audit unchanged', async (_l, body, text) => {
+      const a = await createAs(salesAToken);
+      const before = await applicationRow(a.id);
+
+      const res = await transferOwner(adminToken, a.id, body({ b: salesBId }));
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ statusCode: 400, error: 'Bad Request' });
+      if (text !== undefined) {
+        expect(JSON.stringify(res.body)).toContain(text);
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+    });
+
+    it('denied: an unknown or malformed application id gets the same 404', async () => {
+      const unknown = await transferOwner(adminToken, FAKE_UUID, { salesOwnerId: salesBId });
+      const malformed = await transferOwner(adminToken, 'not-a-uuid', { salesOwnerId: salesBId });
+
+      for (const res of [unknown, malformed]) {
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual(NOT_FOUND_BODY);
+      }
+      await expect(auditRows()).resolves.toEqual([]);
+    });
+
+    it.each(['APPROVED', 'REJECTED'])(
+      'denied: transferring in %s gets 409 INVALID_STATE_TRANSITION; row and audit unchanged',
+      async (status) => {
+        const a = await createAs(salesAToken);
+        await forceState(a.id, { status });
+        const before = await applicationRow(a.id);
+
+        const res = await transferOwner(adminToken, a.id, { salesOwnerId: salesBId });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual(NOT_TRANSFERABLE_BODY);
+        await expect(applicationRow(a.id)).resolves.toEqual(before);
+        expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+      },
+    );
+
+    it('denied: a lost race (version bumped between read and write) gets 409 CONCURRENT_MODIFICATION', async () => {
+      const a = await createAs(salesAToken);
+      const repo = app.get(ApplicationsRepository);
+      // Reference to the real method, taken before spying, so the mock does not call itself.
+      const real = repo.findAccessible.bind(repo);
+      const spy = jest
+        .spyOn(repo, 'findAccessible')
+        .mockImplementationOnce(async (id, actor, manager) => {
+          const found = await real(id, actor, manager);
+          // Separate pool connection; the SELECT above holds no row lock, so this does not block.
+          await dataSource.query(
+            'UPDATE merchant_applications SET version = version + 1 WHERE id = $1',
+            [id],
+          );
+          return found;
+        });
+      let res: request.Response;
+      try {
+        res = await transferOwner(adminToken, a.id, { salesOwnerId: salesBId });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(CONCURRENT_MODIFICATION_BODY);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        sales_owner_id: salesAId,
+        version: 2,
+      });
+      await expect(auditsOf('OWNERSHIP_TRANSFERRED')).resolves.toEqual([]);
+    });
+  });
+
   describe('same transaction as the audit row', () => {
     it('a failed audit write on POST gives 500 and leaves no application row', async () => {
       const spy = jest
@@ -1293,6 +1837,45 @@ describe('Applications (e2e)', () => {
       expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
       // The transaction rolled back, so nothing was enqueued.
       await expectNoKybJob(a.id);
+    });
+
+    it('a failed audit write on assign gives 500 and leaves the row unchanged', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { status: 'UNDER_REVIEW' });
+      const before = await applicationRow(a.id);
+      const spy = jest
+        .spyOn(app.get(AuditLogService), 'record')
+        .mockRejectedValueOnce(new Error('audit write failed (test)'));
+      try {
+        const res = await assign(adminToken, a.id, { reviewerId });
+
+        expect(res.status).toBe(500);
+        expect(res.body).toEqual(INTERNAL_ERROR_BODY);
+      } finally {
+        spy.mockRestore();
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect(before).toMatchObject({ assigned_reviewer_id: null, version: 1 });
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+    });
+
+    it('a failed audit write on transfer gives 500 and leaves the row unchanged', async () => {
+      const a = await createAs(salesAToken);
+      const before = await applicationRow(a.id);
+      const spy = jest
+        .spyOn(app.get(AuditLogService), 'record')
+        .mockRejectedValueOnce(new Error('audit write failed (test)'));
+      try {
+        const res = await transferOwner(adminToken, a.id, { salesOwnerId: salesBId });
+
+        expect(res.status).toBe(500);
+        expect(res.body).toEqual(INTERNAL_ERROR_BODY);
+      } finally {
+        spy.mockRestore();
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect(before).toMatchObject({ sales_owner_id: salesAId, version: 1 });
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
     });
   });
 
@@ -1361,6 +1944,10 @@ describe('Applications (e2e)', () => {
     // Submit: the masked response, the APPLICATION_SUBMITTED audit row and a 409 body.
     expect((await submit(salesAToken, a.id)).status).toBe(200);
     expect((await submit(salesAToken, a.id)).status).toBe(409);
+    // Assign and transfer: masked responses, their audit rows and a 400 body.
+    expect((await assign(adminToken, a.id, { reviewerId })).status).toBe(200);
+    expect((await transferOwner(adminToken, a.id, { salesOwnerId: salesBId })).status).toBe(200);
+    expect((await transferOwner(adminToken, a.id, { salesOwnerId: reviewerId })).status).toBe(400);
     const spy = jest
       .spyOn(app.get(AuditLogService), 'record')
       .mockRejectedValueOnce(new Error('audit write failed (test)'));
@@ -1372,6 +1959,8 @@ describe('Applications (e2e)', () => {
 
     const audits = await auditRows();
     expect(audits.map((row) => row.action)).toContain('APPLICATION_SUBMITTED');
+    expect(audits.map((row) => row.action)).toContain('REVIEWER_ASSIGNED');
+    expect(audits.map((row) => row.action)).toContain('OWNERSHIP_TRANSFERRED');
     const stored = JSON.stringify(audits);
     const texts = [capturedText(), stored, ...responseTexts];
     const secrets = [
@@ -1382,6 +1971,8 @@ describe('Applications (e2e)', () => {
       RAW_OWNER_PHONE,
       salesAToken,
       salesBToken,
+      reviewerToken,
+      reviewer2Token,
       adminToken,
     ];
     for (const text of texts) {

@@ -19,7 +19,10 @@ import {
   CONCURRENT_MODIFICATION_CODE,
   INVALID_STATE_TRANSITION_CODE,
   NO_FIELDS_TO_UPDATE_MESSAGE,
+  NOT_ASSIGNABLE_MESSAGE,
   NOT_SUBMITTABLE_MESSAGE,
+  NOT_TRANSFERABLE_MESSAGE,
+  REVIEWER_NOT_REVIEWER_MESSAGE,
   SALES_OWNER_NOT_SALES_MESSAGE,
   SALES_OWNER_REQUIRED_MESSAGE,
 } from './applications.service';
@@ -32,6 +35,7 @@ const APP_ID = '00000000-0000-4000-8000-0000000000a1';
 const SALES_ID = '00000000-0000-4000-8000-0000000000b1';
 const OTHER_SALES_ID = '00000000-0000-4000-8000-0000000000b2';
 const REVIEWER_ID = '00000000-0000-4000-8000-0000000000c1';
+const OTHER_REVIEWER_ID = '00000000-0000-4000-8000-0000000000c2';
 const ADMIN_ID = '00000000-0000-4000-8000-0000000000d1';
 
 const SALES: AuthUser = { id: SALES_ID, role: UserRole.SALES };
@@ -106,6 +110,8 @@ interface Mocks {
   findAccessiblePage: jest.Mock;
   updateIfEditable: jest.Mock;
   submitIfAllowed: jest.Mock;
+  assignReviewerIfAllowed: jest.Mock;
+  transferOwnerIfAllowed: jest.Mock;
   existsWithRole: jest.Mock;
   record: jest.Mock;
   enqueue: jest.Mock;
@@ -119,6 +125,8 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
   const findAccessiblePage = jest.fn().mockResolvedValue({ items: [], total: 0 });
   const updateIfEditable = jest.fn().mockResolvedValue(true);
   const submitIfAllowed = jest.fn().mockResolvedValue(true);
+  const assignReviewerIfAllowed = jest.fn().mockResolvedValue(true);
+  const transferOwnerIfAllowed = jest.fn().mockResolvedValue(true);
   const existsWithRole = jest.fn().mockResolvedValue(true);
   const record = jest.fn().mockResolvedValue(undefined);
   const enqueue = jest.fn().mockResolvedValue(true);
@@ -130,6 +138,8 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
       findAccessiblePage,
       updateIfEditable,
       submitIfAllowed,
+      assignReviewerIfAllowed,
+      transferOwnerIfAllowed,
     } as unknown as ApplicationsRepository,
     { existsWithRole } as unknown as UsersRepository,
     { record } as unknown as AuditLogService,
@@ -144,6 +154,8 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     findAccessiblePage,
     updateIfEditable,
     submitIfAllowed,
+    assignReviewerIfAllowed,
+    transferOwnerIfAllowed,
     existsWithRole,
     record,
     enqueue,
@@ -725,6 +737,347 @@ describe('ApplicationsService', () => {
         'Application written in this transaction could not be re-read',
       );
       expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('assignReviewer (denied)', () => {
+    it.each([
+      ['SALES', SALES],
+      ['REVIEWER', REVIEWER],
+    ])('%s → 403 before any DB work', async (_label, actor) => {
+      const {
+        service,
+        transaction,
+        existsWithRole,
+        findAccessible,
+        assignReviewerIfAllowed,
+        record,
+      } = setup(fakeApplication({ status: ApplicationStatus.UNDER_REVIEW }));
+
+      await expect(
+        service.assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, actor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(existsWithRole).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+      expect(findAccessible).not.toHaveBeenCalled();
+      expect(assignReviewerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('target is not a REVIEWER → 400 with no transaction', async () => {
+      const { service, transaction, existsWithRole, assignReviewerIfAllowed, record } = setup(
+        fakeApplication({ status: ApplicationStatus.UNDER_REVIEW }),
+      );
+      existsWithRole.mockResolvedValue(false);
+
+      const error = await service
+        .assignReviewer(APP_ID, { reviewerId: SALES_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toBe(REVIEWER_NOT_REVIEWER_MESSAGE);
+      expect(existsWithRole).toHaveBeenCalledWith(SALES_ID, UserRole.REVIEWER);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(assignReviewerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('unknown application → 404 with no write or audit', async () => {
+      const { service, assignReviewerIfAllowed, record } = setup(null);
+
+      const error = await service
+        .assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toBe(APPLICATION_NOT_FOUND_MESSAGE);
+      expect(assignReviewerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it.each([ApplicationStatus.DRAFT, ApplicationStatus.APPROVED, ApplicationStatus.REJECTED])(
+      '%s → 409 INVALID_STATE_TRANSITION with no write or audit',
+      async (status) => {
+        const { service, assignReviewerIfAllowed, record } = setup(fakeApplication({ status }));
+
+        const error = await service
+          .assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN)
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          statusCode: 409,
+          error: 'Conflict',
+          message: NOT_ASSIGNABLE_MESSAGE,
+          code: INVALID_STATE_TRANSITION_CODE,
+        });
+        expect(assignReviewerIfAllowed).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+      },
+    );
+
+    it('lost race (assignReviewerIfAllowed → false) → 409 CONCURRENT_MODIFICATION, no audit', async () => {
+      const { service, findAccessible, assignReviewerIfAllowed, record } = setup(
+        fakeApplication({ status: ApplicationStatus.UNDER_REVIEW }),
+      );
+      assignReviewerIfAllowed.mockResolvedValue(false);
+
+      const error = await service
+        .assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        statusCode: 409,
+        error: 'Conflict',
+        code: CONCURRENT_MODIFICATION_CODE,
+      });
+      expect(record).not.toHaveBeenCalled();
+      expect(findAccessible).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects when the audit write fails', async () => {
+      const { service, record } = setup(
+        fakeApplication({ status: ApplicationStatus.UNDER_REVIEW }),
+      );
+      record.mockRejectedValue(new Error('audit write failed'));
+
+      await expect(
+        service.assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN),
+      ).rejects.toThrow('audit write failed');
+    });
+  });
+
+  describe('assignReviewer (allowed)', () => {
+    it.each([
+      ApplicationStatus.RISK_REVIEW,
+      ApplicationStatus.UNDER_REVIEW,
+      ApplicationStatus.INFO_REQUESTED,
+    ])('ADMIN in %s → guarded write, REVIEWER_ASSIGNED audit, masked response', async (status) => {
+      const { service, findAccessible, existsWithRole, assignReviewerIfAllowed, record, manager } =
+        setup();
+      findAccessible
+        .mockResolvedValueOnce(fakeApplication({ status, version: 4 }))
+        .mockResolvedValueOnce(
+          fakeApplication({ status, version: 5, assignedReviewerId: REVIEWER_ID }),
+        );
+
+      const response = await service.assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN);
+
+      expect(existsWithRole).toHaveBeenCalledWith(REVIEWER_ID, UserRole.REVIEWER);
+      expect(findAccessible).toHaveBeenNthCalledWith(1, APP_ID, ADMIN, manager);
+      expect(assignReviewerIfAllowed).toHaveBeenCalledWith(APP_ID, 4, REVIEWER_ID, ADMIN, manager);
+      const entry = onlyAuditEntry(record);
+      expect(entry).toEqual({
+        actorType: AuditActorType.USER,
+        actorId: ADMIN_ID,
+        actorRole: UserRole.ADMIN,
+        action: AuditAction.REVIEWER_ASSIGNED,
+        entityType: 'merchant_application',
+        entityId: APP_ID,
+        meta: { from: null, to: REVIEWER_ID },
+      });
+      expect((record.mock.calls[0] as unknown[])[1]).toBe(manager);
+      expect(findAccessible).toHaveBeenCalledTimes(2);
+      expect(findAccessible).toHaveBeenNthCalledWith(2, APP_ID, ADMIN, manager);
+      expect(response.assignedReviewerId).toBe(REVIEWER_ID);
+      expect(response.status).toBe(status);
+      expect(response.taxId).toBe('••••••1234');
+      expect(response).not.toHaveProperty('version');
+      expect(response).not.toHaveProperty('meta');
+      expect(response).not.toHaveProperty('kybCheck');
+    });
+
+    it('reassign → meta { from: previous reviewer, to: new reviewer }', async () => {
+      const { service, assignReviewerIfAllowed, record, manager } = setup(
+        fakeApplication({
+          status: ApplicationStatus.UNDER_REVIEW,
+          assignedReviewerId: REVIEWER_ID,
+        }),
+      );
+
+      await service.assignReviewer(APP_ID, { reviewerId: OTHER_REVIEWER_ID }, ADMIN);
+
+      expect(assignReviewerIfAllowed).toHaveBeenCalledWith(
+        APP_ID,
+        1,
+        OTHER_REVIEWER_ID,
+        ADMIN,
+        manager,
+      );
+      expect(onlyAuditEntry(record).meta).toEqual({ from: REVIEWER_ID, to: OTHER_REVIEWER_ID });
+    });
+
+    it('the same reviewer again → normal write and an audit row with from === to', async () => {
+      const { service, assignReviewerIfAllowed, record } = setup(
+        fakeApplication({
+          status: ApplicationStatus.UNDER_REVIEW,
+          assignedReviewerId: REVIEWER_ID,
+        }),
+      );
+
+      await service.assignReviewer(APP_ID, { reviewerId: REVIEWER_ID }, ADMIN);
+
+      expect(assignReviewerIfAllowed).toHaveBeenCalledTimes(1);
+      expect(onlyAuditEntry(record).meta).toEqual({ from: REVIEWER_ID, to: REVIEWER_ID });
+    });
+  });
+
+  describe('transferOwner (denied)', () => {
+    it.each([
+      ['SALES', SALES],
+      ['REVIEWER', REVIEWER],
+    ])('%s → 403 before any DB work', async (_label, actor) => {
+      const {
+        service,
+        transaction,
+        existsWithRole,
+        findAccessible,
+        transferOwnerIfAllowed,
+        record,
+      } = setup();
+
+      await expect(
+        service.transferOwner(APP_ID, { salesOwnerId: OTHER_SALES_ID }, actor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(existsWithRole).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+      expect(findAccessible).not.toHaveBeenCalled();
+      expect(transferOwnerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('target is not SALES → 400 with no transaction', async () => {
+      const { service, transaction, existsWithRole, transferOwnerIfAllowed, record } = setup();
+      existsWithRole.mockResolvedValue(false);
+
+      const error = await service
+        .transferOwner(APP_ID, { salesOwnerId: REVIEWER_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toBe(SALES_OWNER_NOT_SALES_MESSAGE);
+      expect(existsWithRole).toHaveBeenCalledWith(REVIEWER_ID, UserRole.SALES);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(transferOwnerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('unknown application → 404 with no write or audit', async () => {
+      const { service, transferOwnerIfAllowed, record } = setup(null);
+
+      const error = await service
+        .transferOwner(APP_ID, { salesOwnerId: OTHER_SALES_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toBe(APPLICATION_NOT_FOUND_MESSAGE);
+      expect(transferOwnerIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it.each([ApplicationStatus.APPROVED, ApplicationStatus.REJECTED])(
+      '%s → 409 INVALID_STATE_TRANSITION with no write or audit',
+      async (status) => {
+        const { service, transferOwnerIfAllowed, record } = setup(fakeApplication({ status }));
+
+        const error = await service
+          .transferOwner(APP_ID, { salesOwnerId: OTHER_SALES_ID }, ADMIN)
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          statusCode: 409,
+          error: 'Conflict',
+          message: NOT_TRANSFERABLE_MESSAGE,
+          code: INVALID_STATE_TRANSITION_CODE,
+        });
+        expect(transferOwnerIfAllowed).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+      },
+    );
+
+    it('lost race (transferOwnerIfAllowed → false) → 409 CONCURRENT_MODIFICATION, no audit', async () => {
+      const { service, findAccessible, transferOwnerIfAllowed, record } = setup();
+      transferOwnerIfAllowed.mockResolvedValue(false);
+
+      const error = await service
+        .transferOwner(APP_ID, { salesOwnerId: OTHER_SALES_ID }, ADMIN)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        statusCode: 409,
+        error: 'Conflict',
+        code: CONCURRENT_MODIFICATION_CODE,
+      });
+      expect(record).not.toHaveBeenCalled();
+      expect(findAccessible).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects when the audit write fails', async () => {
+      const { service, record } = setup();
+      record.mockRejectedValue(new Error('audit write failed'));
+
+      await expect(
+        service.transferOwner(APP_ID, { salesOwnerId: OTHER_SALES_ID }, ADMIN),
+      ).rejects.toThrow('audit write failed');
+    });
+  });
+
+  describe('transferOwner (allowed)', () => {
+    it.each([
+      ApplicationStatus.DRAFT,
+      ApplicationStatus.RISK_REVIEW,
+      ApplicationStatus.UNDER_REVIEW,
+      ApplicationStatus.INFO_REQUESTED,
+    ])(
+      'ADMIN in %s → guarded write, OWNERSHIP_TRANSFERRED audit, masked response',
+      async (status) => {
+        const { service, findAccessible, existsWithRole, transferOwnerIfAllowed, record, manager } =
+          setup();
+        findAccessible
+          .mockResolvedValueOnce(fakeApplication({ status, version: 7 }))
+          .mockResolvedValueOnce(
+            fakeApplication({ status, version: 8, salesOwnerId: OTHER_SALES_ID }),
+          );
+
+        const response = await service.transferOwner(
+          APP_ID,
+          { salesOwnerId: OTHER_SALES_ID },
+          ADMIN,
+        );
+
+        expect(existsWithRole).toHaveBeenCalledWith(OTHER_SALES_ID, UserRole.SALES);
+        expect(findAccessible).toHaveBeenNthCalledWith(1, APP_ID, ADMIN, manager);
+        expect(transferOwnerIfAllowed).toHaveBeenCalledWith(
+          APP_ID,
+          7,
+          OTHER_SALES_ID,
+          ADMIN,
+          manager,
+        );
+        const entry = onlyAuditEntry(record);
+        expect(entry).toEqual({
+          actorType: AuditActorType.USER,
+          actorId: ADMIN_ID,
+          actorRole: UserRole.ADMIN,
+          action: AuditAction.OWNERSHIP_TRANSFERRED,
+          entityType: 'merchant_application',
+          entityId: APP_ID,
+          meta: { from: SALES_ID, to: OTHER_SALES_ID },
+        });
+        expect((record.mock.calls[0] as unknown[])[1]).toBe(manager);
+        expect(findAccessible).toHaveBeenCalledTimes(2);
+        expect(findAccessible).toHaveBeenNthCalledWith(2, APP_ID, ADMIN, manager);
+        expect(response.salesOwnerId).toBe(OTHER_SALES_ID);
+        expect(response.createdById).toBe(SALES_ID);
+        expect(response.taxId).toBe('••••••1234');
+        expect(response).not.toHaveProperty('version');
+        expect(response).not.toHaveProperty('meta');
+        expect(response).not.toHaveProperty('kybCheck');
+      },
+    );
+
+    it('transfer to the current owner → normal write and an audit row with from === to', async () => {
+      const { service, transferOwnerIfAllowed, record } = setup();
+
+      await service.transferOwner(APP_ID, { salesOwnerId: SALES_ID }, ADMIN);
+
+      expect(transferOwnerIfAllowed).toHaveBeenCalledTimes(1);
+      expect(onlyAuditEntry(record).meta).toEqual({ from: SALES_ID, to: SALES_ID });
     });
   });
 });

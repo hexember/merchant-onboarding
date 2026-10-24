@@ -63,7 +63,7 @@ export class UsersRepository {
 
   /**
    * Target-role check: true when a user with this id has this role. Used for an ADMIN's
-   * `salesOwnerId` on create (later also transfer/assign). Selects nothing sensitive and never
+   * `salesOwnerId` on create and transfer, and `reviewerId` on assign. Selects nothing sensitive and never
    * returns user data to a caller. Returns false without querying when `id` is not a UUID
    * (Postgres would otherwise reject the query with an error).
    */

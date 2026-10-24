@@ -460,4 +460,145 @@ describe('ApplicationsRepository', () => {
       ).resolves.toBe(false);
     });
   });
+
+  // The two ownership/assignment writes share one shape; each case runs for both.
+  const TARGET_ID = '00000000-0000-4000-8000-0000000000e1';
+
+  interface OwnershipWriteCase {
+    name: 'assignReviewerIfAllowed' | 'transferOwnerIfAllowed';
+    column: 'assignedReviewerId' | 'salesOwnerId';
+    statusParam: string;
+    statuses: ApplicationStatus[];
+  }
+
+  const OWNERSHIP_WRITES: OwnershipWriteCase[] = [
+    {
+      name: 'assignReviewerIfAllowed',
+      column: 'assignedReviewerId',
+      statusParam: 'assignableStatuses',
+      statuses: [
+        ApplicationStatus.RISK_REVIEW,
+        ApplicationStatus.UNDER_REVIEW,
+        ApplicationStatus.INFO_REQUESTED,
+      ],
+    },
+    {
+      name: 'transferOwnerIfAllowed',
+      column: 'salesOwnerId',
+      statusParam: 'transferableStatuses',
+      statuses: [
+        ApplicationStatus.DRAFT,
+        ApplicationStatus.RISK_REVIEW,
+        ApplicationStatus.UNDER_REVIEW,
+        ApplicationStatus.INFO_REQUESTED,
+      ],
+    },
+  ];
+
+  describe.each(OWNERSHIP_WRITES)('$name', ({ name, column, statusParam, statuses }) => {
+    function setupWrite(affected: number | undefined): {
+      manager: EntityManager;
+      updateQb: Record<'update' | 'set' | 'where' | 'andWhere' | 'execute', jest.Mock>;
+    } {
+      const updateQb = {
+        update: jest.fn(),
+        set: jest.fn(),
+        where: jest.fn(),
+        andWhere: jest.fn(),
+        execute: jest.fn().mockResolvedValue({ affected, raw: [], generatedMaps: [] }),
+      };
+      updateQb.update.mockReturnValue(updateQb);
+      updateQb.set.mockReturnValue(updateQb);
+      updateQb.where.mockReturnValue(updateQb);
+      updateQb.andWhere.mockReturnValue(updateQb);
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(updateQb),
+      } as unknown as EntityManager;
+      return { manager, updateQb };
+    }
+
+    function run(actor: AuthUser, manager: EntityManager): Promise<boolean> {
+      const repository = setup().repository;
+      return repository[name](APP_ID, 4, TARGET_ID, actor, manager);
+    }
+
+    function onlySetArg(updateQb: { set: jest.Mock }): Record<string, unknown> {
+      expect(updateQb.set).toHaveBeenCalledTimes(1);
+      const [setArg] = updateQb.set.mock.calls[0] as [Record<string, unknown>];
+      return setArg;
+    }
+
+    function raw(value: unknown): string {
+      expect(typeof value).toBe('function');
+      return (value as () => string)();
+    }
+
+    const VERSION_AND_STATUS = [
+      ['version = :expectedVersion', { expectedVersion: 4 }],
+      [`status IN (:...${statusParam})`, { [statusParam]: statuses }],
+    ];
+
+    it(`sets only ${column}, bumps version and updated_at, and checks id, version and status`, async () => {
+      const { manager, updateQb } = setupWrite(1);
+
+      await expect(run(ADMIN, manager)).resolves.toBe(true);
+
+      expect(updateQb.update).toHaveBeenCalledWith(MerchantApplication);
+      const setArg = onlySetArg(updateQb);
+      expect(Object.keys(setArg).sort()).toEqual([column, 'updatedAt', 'version'].sort());
+      expect(setArg[column]).toBe(TARGET_ID);
+      expect(raw(setArg['version'])).toBe('version + 1');
+      expect(raw(setArg['updatedAt'])).toBe('now()');
+      expect(updateQb.where).toHaveBeenCalledWith('id = :id', { id: APP_ID });
+      // ADMIN adds no scope condition.
+      expect(updateQb.andWhere.mock.calls).toEqual(VERSION_AND_STATUS);
+    });
+
+    it('never touches status, KYB, submission count or creator columns', async () => {
+      const { manager, updateQb } = setupWrite(1);
+
+      await run(ADMIN, manager);
+
+      const keys = Object.keys(onlySetArg(updateQb));
+      for (const forbidden of ['status', 'kybStatus', 'submissionCount', 'createdById']) {
+        expect(keys).not.toContain(forbidden);
+      }
+    });
+
+    it('SALES: repeats the scope as sales_owner_id = actor id', async () => {
+      const { manager, updateQb } = setupWrite(1);
+
+      await run(SALES, manager);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_STATUS,
+        ['sales_owner_id = :actorId', { actorId: SALES_ID }],
+      ]);
+    });
+
+    it('REVIEWER: repeats the scope as assigned_reviewer_id = actor id', async () => {
+      const { manager, updateQb } = setupWrite(1);
+
+      await run(REVIEWER, manager);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_STATUS,
+        ['assigned_reviewer_id = :actorId', { actorId: REVIEWER_ID }],
+      ]);
+    });
+
+    it('unknown role: fails closed with 1 = 0 and returns false', async () => {
+      const { manager, updateQb } = setupWrite(0);
+
+      await expect(run(UNKNOWN_ROLE, manager)).resolves.toBe(false);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([...VERSION_AND_STATUS, ['1 = 0']]);
+    });
+
+    it.each([0, undefined])('returns false when affected is %s', async (affected) => {
+      const { manager } = setupWrite(affected);
+
+      await expect(run(ADMIN, manager)).resolves.toBe(false);
+    });
+  });
 });
