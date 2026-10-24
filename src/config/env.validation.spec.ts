@@ -165,39 +165,6 @@ describe('validateEnv', () => {
     });
   });
 
-  describe('LOG_LEVEL', () => {
-    it('defaults to log when unset', () => {
-      expect(validateEnv(validRaw()).LOG_LEVEL).toBe('log');
-    });
-
-    it('defaults to log for an empty string', () => {
-      expect(validateEnv({ ...validRaw(), LOG_LEVEL: '' }).LOG_LEVEL).toBe('log');
-    });
-
-    it.each(['fatal', 'error', 'warn', 'log', 'debug', 'verbose'])('accepts %p', (level) => {
-      expect(validateEnv({ ...validRaw(), LOG_LEVEL: level }).LOG_LEVEL).toBe(level);
-    });
-
-    it('trims and lowercases the value', () => {
-      expect(validateEnv({ ...validRaw(), LOG_LEVEL: ' DEBUG ' }).LOG_LEVEL).toBe('debug');
-    });
-
-    it.each(['info', 'trace', '1', 'warning'])('throws naming LOG_LEVEL for %p', (value) => {
-      const message = errorMessage(() => validateEnv({ ...validRaw(), LOG_LEVEL: value }));
-
-      expect(message).toContain('LOG_LEVEL');
-    });
-
-    it('does not put the invalid value in the error message', () => {
-      const message = errorMessage(() =>
-        validateEnv({ ...validRaw(), LOG_LEVEL: 'not-a-level-value' }),
-      );
-
-      expect(message).toContain('LOG_LEVEL');
-      expect(message).not.toContain('not-a-level-value');
-    });
-  });
-
   describe('JWT_SECRET', () => {
     it('accepts exactly the minimum length and returns the value unchanged', () => {
       expect(JWT_SECRET_FIXTURE).toHaveLength(32);

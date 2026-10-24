@@ -11,7 +11,6 @@ import { AppModule } from '../src/app.module';
 import { AuthUser } from '../src/auth/auth-user';
 import { CurrentUser } from '../src/auth/decorators/current-user.decorator';
 import { Roles } from '../src/auth/decorators/roles.decorator';
-import { AppLogger } from '../src/logging/app-logger.service';
 import { UserRole } from '../src/common/common.enums';
 import { BCRYPT_COST } from '../src/common/password';
 import { setupSwagger } from '../src/common/swagger';
@@ -23,25 +22,22 @@ const SALES_EMAIL = 'sales@example.com';
 const ADMIN_EMAIL = 'admin@example.com';
 const UNKNOWN_EMAIL = 'nobody@example.com';
 
+// Nest's default error bodies (there is no global exception filter). A bare
+// `new UnauthorizedException()` has no `error` field; one with a message adds it.
 const UNAUTHORIZED_BODY = {
   statusCode: 401,
-  error: 'Unauthorized',
   message: 'Unauthorized',
-  code: 'UNAUTHORIZED',
 };
 
 const INVALID_CREDENTIALS_BODY = {
   statusCode: 401,
   error: 'Unauthorized',
   message: 'Invalid credentials',
-  code: 'UNAUTHORIZED',
 };
 
 const FORBIDDEN_BODY = {
   statusCode: 403,
-  error: 'Forbidden',
   message: 'Forbidden',
-  code: 'FORBIDDEN',
 };
 
 // Test-only controller; it exists only inside this spec and reaches no application data.
@@ -111,8 +107,7 @@ describe('Auth (e2e)', () => {
       imports: [AppModule],
       controllers: [AuthProbeController],
     }).compile();
-    app = module.createNestApplication<INestApplication<App>>({ bufferLogs: true });
-    app.useLogger(app.get(AppLogger));
+    app = module.createNestApplication<INestApplication<App>>();
     setupSwagger(app, true);
     await app.init();
     dataSource = app.get(DataSource);
@@ -275,7 +270,7 @@ describe('Auth (e2e)', () => {
     ])('denied: %s gets 400 and writes no audit row', async (_label, body) => {
       const res = await request(server()).post('/auth/login').send(body).expect(400);
 
-      expect(res.body).toMatchObject({ statusCode: 400, code: 'BAD_REQUEST' });
+      expect(res.body).toMatchObject({ statusCode: 400, error: 'Bad Request' });
       await expect(auditRows()).resolves.toEqual([]);
     });
 

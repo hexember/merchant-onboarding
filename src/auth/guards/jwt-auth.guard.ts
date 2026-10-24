@@ -30,7 +30,7 @@ function bearerToken(header: string | string[] | undefined): string | null {
  * After the token checks out, the guard re-reads the caller's own `id` and `role` from the users
  * table (one primary-key lookup), so a deleted user gets 401 and a role change takes effect on
  * the next request. `request.user.role` comes from the database, not from the token.
- * It does not log; the exception filter logs the 401.
+ * It does not log.
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {

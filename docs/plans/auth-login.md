@@ -527,3 +527,16 @@ Defaults taken in unattended mode:
   - `RolesGuard` now reads `ROLES_KEY` first and applies it even on `@Public()` routes (no user →
     401, wrong role → 403). New unit cases.
   - Login rate limiting: not implemented; added to docs/production-readiness.md and Risks.
+- **Rebase onto simplified logging:** the logging module was replaced by plain `logInfo` /
+  `logError` (`src/logging/logger.ts`), with no global exception filter and no `LOG_LEVEL`.
+  - Error bodies are now Nest's defaults: `{ statusCode: 401, message: 'Unauthorized' }` from the
+    guards, `{ statusCode: 401, error: 'Unauthorized', message: 'Invalid credentials' }` from login
+    (identical for unknown email and wrong password), `{ statusCode: 403, message: 'Forbidden' }`
+    from `RolesGuard`, and the `ValidationPipe`'s `{ statusCode: 400, error: 'Bad Request',
+    message: [...] }`. There is no `code` field. References above to the filter's body, its
+    `code` values and its warn line are superseded; auth code still does not log.
+  - The `test/logging.e2e-spec.ts` edits (step 20) were dropped together with that spec. The
+    e2e spec no longer installs `AppLogger`; it still spies stdout/stderr and asserts that no
+    password, raw email or token appears there or in the audit rows.
+  - `LOG_LEVEL` is gone from `validateEnv` and from `test/setup/test-env.ts`; `JWT_SECRET`
+    validation and `ensureTestJwtSecret` are unchanged.

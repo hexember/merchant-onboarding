@@ -5,7 +5,6 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { validateEnv } from './config/env.validation';
 import { DatabaseModule } from './database/database.module';
-import { LoggingModule } from './logging/logging.module';
 import { UsersModule } from './users/users.module';
 
 // Root module. Feature modules are added here by later tasks. The global pipe (here) and the
@@ -14,7 +13,6 @@ import { UsersModule } from './users/users.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
-    LoggingModule,
     DatabaseModule,
     UsersModule,
     AuditModule,

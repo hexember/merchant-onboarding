@@ -72,9 +72,6 @@ export function applyTestDatabaseEnv(): void {
   // A secret from .env or the shell wins. The second call (setupFiles after globalSetup) sees the
   // value already set and keeps it, so one process uses one secret.
   process.env.JWT_SECRET = ensureTestJwtSecret(process.env);
-  // Always override, like DB_NAME: a developer's .env (e.g. LOG_LEVEL=error) must not hide the
-  // warn lines the e2e tests assert on. NODE_ENV is left alone.
-  process.env.LOG_LEVEL = 'log';
   const resolved = resolveTestDatabaseEnv(process.env);
   process.env.DB_NAME = resolved.DB_NAME;
   process.env.DB_NAME_ORIGINAL = resolved.DB_NAME_ORIGINAL;

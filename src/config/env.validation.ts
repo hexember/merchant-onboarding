@@ -1,6 +1,5 @@
 // Validates the environment once at startup (ConfigModule `validate`) and for the CLI data source.
 // Error messages name the invalid variables, never their values.
-import { isLogLevel, type LogLevel } from '../logging/log-entry';
 
 export interface AppEnv {
   NODE_ENV: string;
@@ -11,7 +10,6 @@ export interface AppEnv {
   DB_PASSWORD: string;
   DB_NAME: string;
   SWAGGER_ENABLED: boolean;
-  LOG_LEVEL: LogLevel;
   JWT_SECRET: string;
 }
 
@@ -20,7 +18,6 @@ const DEFAULT_APP_PORT = 3000;
 const DEFAULT_DB_PORT = 5432;
 const MIN_PORT = 1;
 const MAX_PORT = 65535;
-const DEFAULT_LOG_LEVEL: LogLevel = 'log';
 // HS256 key floor: 32 characters (256 bits). A short placeholder such as `change-me` fails fast.
 export const JWT_SECRET_MIN_LENGTH = 32;
 // A long but trivial key (e.g. 32 times 'a', or 'abab...') is refused: it needs at least this
@@ -113,27 +110,6 @@ function readBoolean(
   return defaultValue;
 }
 
-// Accepts one of the LOG_LEVELS names (trimmed, any case).
-function readLogLevel(
-  raw: Record<string, unknown>,
-  name: string,
-  defaultLevel: LogLevel,
-  invalid: string[],
-): LogLevel {
-  const value = raw[name];
-  if (value === undefined || value === '') {
-    return defaultLevel;
-  }
-  if (typeof value === 'string') {
-    const text = value.trim().toLowerCase();
-    if (isLogLevel(text)) {
-      return text;
-    }
-  }
-  invalid.push(name);
-  return defaultLevel;
-}
-
 export function validateEnv(raw: Record<string, unknown>): Record<string, unknown> & AppEnv {
   const invalid: string[] = [];
 
@@ -151,7 +127,6 @@ export function validateEnv(raw: Record<string, unknown>): Record<string, unknow
     DB_NAME: readRequiredString(raw, 'DB_NAME', invalid),
     // Swagger UI (/docs) stays off in production unless someone sets SWAGGER_ENABLED=true on purpose.
     SWAGGER_ENABLED: readBoolean(raw, 'SWAGGER_ENABLED', nodeEnv !== 'production', invalid),
-    LOG_LEVEL: readLogLevel(raw, 'LOG_LEVEL', DEFAULT_LOG_LEVEL, invalid),
     JWT_SECRET: readSecret(raw, 'JWT_SECRET', JWT_SECRET_MIN_LENGTH, invalid),
   };
 
