@@ -119,3 +119,8 @@ exactly one result.
 
 Index `(entity_type, entity_id, created_at)`. The audit row is written **in the same transaction**
 as the change it describes, so an action cannot succeed without an audit record.
+
+Append-only is enforced by triggers that reject `UPDATE`, `DELETE` and `TRUNCATE` on `audit_logs`.
+Test cleanup briefly disables the triggers inside a transaction.
+`meta` is redacted, masked and capped at 8 KB. A larger value is stored as
+`{ "truncated": true, "originalBytes": <n> }` instead of failing the action.
