@@ -10,8 +10,6 @@ import { createDataSourceOptions } from './database.options';
       inject: [ConfigService],
       useFactory: (config: ConfigService) =>
         createDataSourceOptions({
-          NODE_ENV: config.getOrThrow<string>('NODE_ENV'),
-          PORT: config.getOrThrow<number>('PORT'),
           DB_HOST: config.getOrThrow<string>('DB_HOST'),
           DB_PORT: config.getOrThrow<number>('DB_PORT'),
           DB_USER: config.getOrThrow<string>('DB_USER'),

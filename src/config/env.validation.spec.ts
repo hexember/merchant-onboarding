@@ -89,4 +89,71 @@ describe('validateEnv', () => {
 
     expect(message).not.toContain('not-a-port-value');
   });
+
+  describe('SWAGGER_ENABLED', () => {
+    it('defaults to true when unset and NODE_ENV=test', () => {
+      expect(validateEnv(validRaw()).SWAGGER_ENABLED).toBe(true);
+    });
+
+    it('defaults to true when NODE_ENV is unset (development)', () => {
+      const raw = validRaw();
+      delete raw.NODE_ENV;
+
+      expect(validateEnv(raw).SWAGGER_ENABLED).toBe(true);
+    });
+
+    it('defaults to false when NODE_ENV=production', () => {
+      expect(validateEnv({ ...validRaw(), NODE_ENV: 'production' }).SWAGGER_ENABLED).toBe(false);
+    });
+
+    it.each([
+      ['true', true],
+      ['false', false],
+      [' TRUE ', true],
+    ])('parses %p as %p', (value, expected) => {
+      expect(validateEnv({ ...validRaw(), SWAGGER_ENABLED: value }).SWAGGER_ENABLED).toBe(expected);
+    });
+
+    it('allows an explicit true to override the production default', () => {
+      const result = validateEnv({
+        ...validRaw(),
+        NODE_ENV: 'production',
+        SWAGGER_ENABLED: 'true',
+      });
+
+      expect(result.SWAGGER_ENABLED).toBe(true);
+    });
+
+    it('allows an explicit false in development', () => {
+      const result = validateEnv({
+        ...validRaw(),
+        NODE_ENV: 'development',
+        SWAGGER_ENABLED: 'false',
+      });
+
+      expect(result.SWAGGER_ENABLED).toBe(false);
+    });
+
+    it('falls back to the default for an empty string', () => {
+      expect(validateEnv({ ...validRaw(), SWAGGER_ENABLED: '' }).SWAGGER_ENABLED).toBe(true);
+      expect(
+        validateEnv({ ...validRaw(), NODE_ENV: 'production', SWAGGER_ENABLED: '' }).SWAGGER_ENABLED,
+      ).toBe(false);
+    });
+
+    it.each(['yes', '1', '0', 'enabled'])('throws naming SWAGGER_ENABLED for %p', (value) => {
+      const message = errorMessage(() => validateEnv({ ...validRaw(), SWAGGER_ENABLED: value }));
+
+      expect(message).toContain('SWAGGER_ENABLED');
+    });
+
+    it('does not put the invalid value in the error message', () => {
+      const message = errorMessage(() =>
+        validateEnv({ ...validRaw(), SWAGGER_ENABLED: 'not-a-bool-value' }),
+      );
+
+      expect(message).toContain('SWAGGER_ENABLED');
+      expect(message).not.toContain('not-a-bool-value');
+    });
+  });
 });
