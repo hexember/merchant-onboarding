@@ -6,7 +6,8 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 
 export default tseslint.config(
   {
-    ignores: ['dist/', 'coverage/', 'node_modules/', 'eslint.config.mjs'],
+    // .claude/worktrees/ holds separate git worktrees (other branches, their own dist/).
+    ignores: ['dist/', 'coverage/', 'node_modules/', 'eslint.config.mjs', '.claude/worktrees/'],
   },
   eslint.configs.recommended,
   {
