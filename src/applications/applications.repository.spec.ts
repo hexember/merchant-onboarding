@@ -2,6 +2,7 @@ import { EntityManager, Repository } from 'typeorm';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
 import { ApplicationStatus, BusinessType, KybStatus } from './application.enums';
+import { DecisionAction, TransitionAction } from './application-state-machine';
 import { ApplicationsRepository, NewApplication } from './applications.repository';
 import { MerchantApplication } from './merchant-application.entity';
 
@@ -599,6 +600,271 @@ describe('ApplicationsRepository', () => {
       const { manager } = setupWrite(affected);
 
       await expect(run(ADMIN, manager)).resolves.toBe(false);
+    });
+  });
+
+  describe('decideIfAllowed', () => {
+    function setupDecide(affected: number | undefined): {
+      manager: EntityManager;
+      updateQb: Record<'update' | 'set' | 'where' | 'andWhere' | 'execute', jest.Mock>;
+    } {
+      const updateQb = {
+        update: jest.fn(),
+        set: jest.fn(),
+        where: jest.fn(),
+        andWhere: jest.fn(),
+        execute: jest.fn().mockResolvedValue({ affected, raw: [], generatedMaps: [] }),
+      };
+      updateQb.update.mockReturnValue(updateQb);
+      updateQb.set.mockReturnValue(updateQb);
+      updateQb.where.mockReturnValue(updateQb);
+      updateQb.andWhere.mockReturnValue(updateQb);
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(updateQb),
+      } as unknown as EntityManager;
+      return { manager, updateQb };
+    }
+
+    function onlySetArg(updateQb: { set: jest.Mock }): Record<string, unknown> {
+      expect(updateQb.set).toHaveBeenCalledTimes(1);
+      const [setArg] = updateQb.set.mock.calls[0] as [Record<string, unknown>];
+      return setArg;
+    }
+
+    function raw(value: unknown): string {
+      expect(typeof value).toBe('function');
+      return (value as () => string)();
+    }
+
+    const VERSION_AND_DECIDABLE = [
+      ['version = :expectedVersion', { expectedVersion: 4 }],
+      [
+        'status IN (:...decidableStatuses)',
+        { decidableStatuses: [ApplicationStatus.UNDER_REVIEW] },
+      ],
+    ];
+    const KYB_COMPLETED_CONDITION = [
+      'kyb_status = :kybCompleted',
+      { kybCompleted: KybStatus.COMPLETED },
+    ];
+    const REVIEWER_SCOPE = ['assigned_reviewer_id = :actorId', { actorId: REVIEWER_ID }];
+
+    const DECISIONS: [DecisionAction, ApplicationStatus][] = [
+      [TransitionAction.APPROVE, ApplicationStatus.APPROVED],
+      [TransitionAction.REJECT, ApplicationStatus.REJECTED],
+      [TransitionAction.REQUEST_INFO, ApplicationStatus.INFO_REQUESTED],
+    ];
+
+    it.each(DECISIONS)(
+      '%s: sets only status, decision note, decided_at, version and updated_at',
+      async (action, to) => {
+        const { repository } = setup();
+        const { manager, updateQb } = setupDecide(1);
+
+        await expect(
+          repository.decideIfAllowed(APP_ID, 4, action, to, 'more docs', REVIEWER, manager),
+        ).resolves.toBe(true);
+
+        expect(updateQb.update).toHaveBeenCalledWith(MerchantApplication);
+        const setArg = onlySetArg(updateQb);
+        expect(Object.keys(setArg).sort()).toEqual(
+          ['status', 'decisionNote', 'decidedAt', 'version', 'updatedAt'].sort(),
+        );
+        expect(setArg['status']).toBe(to);
+        expect(setArg['decisionNote']).toBe('more docs');
+        expect(raw(setArg['decidedAt'])).toBe('now()');
+        expect(raw(setArg['version'])).toBe('version + 1');
+        expect(raw(setArg['updatedAt'])).toBe('now()');
+      },
+    );
+
+    it('writes a null decision note when no note is given', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.REJECT,
+        ApplicationStatus.REJECTED,
+        null,
+        REVIEWER,
+        manager,
+      );
+
+      expect(onlySetArg(updateQb)['decisionNote']).toBeNull();
+    });
+
+    it('APPROVE: checks id, version, UNDER_REVIEW, a bound kyb_status = COMPLETED and the REVIEWER scope', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.APPROVE,
+        ApplicationStatus.APPROVED,
+        null,
+        REVIEWER,
+        manager,
+      );
+
+      expect(updateQb.where).toHaveBeenCalledWith('id = :id', { id: APP_ID });
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_DECIDABLE,
+        KYB_COMPLETED_CONDITION,
+        REVIEWER_SCOPE,
+      ]);
+    });
+
+    it('APPROVE: the kyb_status value is a bound parameter, never a literal in the SQL', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.APPROVE,
+        ApplicationStatus.APPROVED,
+        null,
+        REVIEWER,
+        manager,
+      );
+
+      type Condition = [string, Record<string, unknown>?];
+      const calls: Condition[] = [
+        ...(updateQb.where.mock.calls as Condition[]),
+        ...(updateQb.andWhere.mock.calls as Condition[]),
+      ];
+      const sql = calls.map(([condition]) => condition).join(' AND ');
+      expect(sql).toContain('kyb_status = :kybCompleted');
+      expect(sql).not.toContain('COMPLETED');
+      const parameters = calls.map(([, params]) => params ?? {});
+      expect(parameters).toContainEqual({ kybCompleted: KybStatus.COMPLETED });
+    });
+
+    const NO_KYB_DECISIONS: [DecisionAction, ApplicationStatus][] = [
+      [TransitionAction.REJECT, ApplicationStatus.REJECTED],
+      [TransitionAction.REQUEST_INFO, ApplicationStatus.INFO_REQUESTED],
+    ];
+
+    it.each(NO_KYB_DECISIONS)('%s: has no kyb_status condition', async (action, to) => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(APP_ID, 4, action, to, null, REVIEWER, manager);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([...VERSION_AND_DECIDABLE, REVIEWER_SCOPE]);
+      const conditions = (updateQb.andWhere.mock.calls as [string][]).map(([c]) => c);
+      expect(conditions.some((c) => c.includes('kyb_status'))).toBe(false);
+    });
+
+    it('SALES: repeats the scope as sales_owner_id = actor id', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.REJECT,
+        ApplicationStatus.REJECTED,
+        null,
+        SALES,
+        manager,
+      );
+
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_DECIDABLE,
+        ['sales_owner_id = :actorId', { actorId: SALES_ID }],
+      ]);
+    });
+
+    it('ADMIN: adds no scope condition', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.REJECT,
+        ApplicationStatus.REJECTED,
+        null,
+        ADMIN,
+        manager,
+      );
+
+      expect(updateQb.andWhere.mock.calls).toEqual(VERSION_AND_DECIDABLE);
+    });
+
+    it('unknown role: fails closed with 1 = 0 and returns false', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(0);
+
+      await expect(
+        repository.decideIfAllowed(
+          APP_ID,
+          4,
+          TransitionAction.APPROVE,
+          ApplicationStatus.APPROVED,
+          null,
+          UNKNOWN_ROLE,
+          manager,
+        ),
+      ).resolves.toBe(false);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_DECIDABLE,
+        KYB_COMPLETED_CONDITION,
+        ['1 = 0'],
+      ]);
+    });
+
+    it.each([0, undefined])('returns false when affected is %s', async (affected) => {
+      const { repository } = setup();
+      const { manager } = setupDecide(affected);
+
+      await expect(
+        repository.decideIfAllowed(
+          APP_ID,
+          4,
+          TransitionAction.APPROVE,
+          ApplicationStatus.APPROVED,
+          null,
+          REVIEWER,
+          manager,
+        ),
+      ).resolves.toBe(false);
+    });
+
+    it('never touches ownership, assignment, KYB, submission count or creator columns', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupDecide(1);
+
+      await repository.decideIfAllowed(
+        APP_ID,
+        4,
+        TransitionAction.APPROVE,
+        ApplicationStatus.APPROVED,
+        'note',
+        REVIEWER,
+        manager,
+      );
+
+      const keys = Object.keys(onlySetArg(updateQb));
+      for (const forbidden of [
+        'salesOwnerId',
+        'assignedReviewerId',
+        'kybStatus',
+        'kybLevel',
+        'kybScore',
+        'kybAttempts',
+        'kybLastAttemptAt',
+        'submissionCount',
+        'submittedAt',
+        'createdById',
+      ]) {
+        expect(keys).not.toContain(forbidden);
+      }
     });
   });
 });

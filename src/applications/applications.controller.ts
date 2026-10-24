@@ -35,6 +35,7 @@ import {
 import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { RecordDecisionDto } from './dto/record-decision.dto';
 import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 
@@ -158,5 +159,25 @@ export class ApplicationsController {
     @CurrentUser() actor: AuthUser,
   ): Promise<ApplicationResponseDto> {
     return this.applicationsService.transferOwner(id, dto, actor);
+  }
+
+  @Post(':id/decision')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.REVIEWER)
+  @ApiOperation({ summary: 'Record a decision (assigned REVIEWER)' })
+  @ApiOkResponse({ type: ApplicationResponseDto })
+  @ApiBadRequestResponse({ description: 'Validation failed' })
+  @ApiForbiddenResponse({ description: 'Wrong role' })
+  @ApiNotFoundResponse({ description: 'Unknown id or not assigned to the caller' })
+  @ApiConflictResponse({
+    description:
+      'Not decidable in its status (INVALID_STATE_TRANSITION), APPROVE before the KYB check completed (KYB_NOT_COMPLETED) or changed concurrently (CONCURRENT_MODIFICATION)',
+  })
+  decide(
+    @Param('id') id: string,
+    @Body() dto: RecordDecisionDto,
+    @CurrentUser() actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    return this.applicationsService.decide(id, dto, actor);
   }
 }

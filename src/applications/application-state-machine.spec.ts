@@ -2,6 +2,8 @@ import { UserRole } from '../common/common.enums';
 import { ApplicationStatus } from './application.enums';
 import {
   ApplicationOperation,
+  DECISION_ACTIONS,
+  DecisionAction,
   OPERATIONS,
   TERMINAL_STATUSES,
   TRANSITIONS,
@@ -16,6 +18,7 @@ import {
   isRoleAllowed,
   nextStatus,
   nextSystemStatus,
+  requiresCompletedKyb,
 } from './application-state-machine';
 
 const S = ApplicationStatus;
@@ -242,6 +245,57 @@ describe('application state machine', () => {
 
     it.each(Object.values(UserRole))('a cast KYB_COMPLETE is never allowed for %s', (role) => {
       expect(isRoleAllowed(A.KYB_COMPLETE as unknown as UserTransitionAction, role)).toBe(false);
+    });
+  });
+
+  describe('decision actions', () => {
+    const DECISION_TARGETS: Record<DecisionAction, ApplicationStatus> = {
+      [A.APPROVE]: S.APPROVED,
+      [A.REJECT]: S.REJECTED,
+      [A.REQUEST_INFO]: S.INFO_REQUESTED,
+    };
+
+    it('are exactly APPROVE, REJECT and REQUEST_INFO', () => {
+      expect([...DECISION_ACTIONS].sort()).toEqual([A.APPROVE, A.REJECT, A.REQUEST_INFO].sort());
+    });
+
+    it('contain neither SUBMIT nor KYB_COMPLETE', () => {
+      const actions: readonly TransitionAction[] = DECISION_ACTIONS;
+      expect(actions).not.toContain(A.SUBMIT);
+      expect(actions).not.toContain(A.KYB_COMPLETE);
+    });
+
+    it('KYB_COMPLETE is not in DECISION_ACTIONS and a cast KYB_COMPLETE has no next status', () => {
+      expect(DECISION_ACTIONS as readonly TransitionAction[]).not.toContain(A.KYB_COMPLETE);
+      expect(nextStatus(S.UNDER_REVIEW, A.KYB_COMPLETE as never)).toBeNull();
+    });
+
+    it.each(DECISION_ACTIONS)('%s leads from UNDER_REVIEW to its target', (action) => {
+      expect(nextStatus(S.UNDER_REVIEW, action)).toBe(DECISION_TARGETS[action]);
+    });
+
+    const OTHER_PAIRS: [ApplicationStatus, DecisionAction][] = ALL_STATUSES.filter(
+      (status) => status !== S.UNDER_REVIEW,
+    ).flatMap((status) =>
+      DECISION_ACTIONS.map((action): [ApplicationStatus, DecisionAction] => [status, action]),
+    );
+
+    it.each(OTHER_PAIRS)('%s / %s → null', (status, action) => {
+      expect(nextStatus(status, action)).toBeNull();
+    });
+
+    it.each(DECISION_ACTIONS)('%s is allowed for REVIEWER only', (action) => {
+      expect(isRoleAllowed(action, UserRole.REVIEWER)).toBe(true);
+      expect(isRoleAllowed(action, UserRole.ADMIN)).toBe(false);
+      expect(isRoleAllowed(action, UserRole.SALES)).toBe(false);
+    });
+
+    it.each([
+      [A.APPROVE, true],
+      [A.REJECT, false],
+      [A.REQUEST_INFO, false],
+    ] as [DecisionAction, boolean][])('requiresCompletedKyb(%s) → %s', (action, expected) => {
+      expect(requiresCompletedKyb(action)).toBe(expected);
     });
   });
 

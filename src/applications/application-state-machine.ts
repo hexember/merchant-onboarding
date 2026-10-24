@@ -7,8 +7,10 @@ import { ApplicationStatus } from './application.enums';
 //
 // The `guard` text and the "owner" / "assigned" part of `who` are descriptive only. The actor
 // scope comes from `ApplicationsRepository`, and each guard is enforced by the item that
-// implements the action. Anything not in `TRANSITIONS` is an invalid transition (409
-// `INVALID_STATE_TRANSITION`).
+// implements the action. The APPROVE guard (`kybStatus = COMPLETED`, see `requiresCompletedKyb`)
+// is enforced by `ApplicationsService.decide` and again in the WHERE of
+// `ApplicationsRepository.decideIfAllowed`. Anything not in `TRANSITIONS` is an invalid
+// transition (409 `INVALID_STATE_TRANSITION`).
 
 /** Every action that changes `status`. */
 export enum TransitionAction {
@@ -37,6 +39,21 @@ export const USER_TRANSITION_ACTIONS: readonly UserTransitionAction[] = [
   TransitionAction.REJECT,
   TransitionAction.REQUEST_INFO,
 ];
+
+/** The reviewer decisions (`POST /applications/:id/decision`). No SUBMIT, no KYB_COMPLETE. */
+export type DecisionAction =
+  TransitionAction.APPROVE | TransitionAction.REJECT | TransitionAction.REQUEST_INFO;
+
+export const DECISION_ACTIONS: readonly DecisionAction[] = [
+  TransitionAction.APPROVE,
+  TransitionAction.REJECT,
+  TransitionAction.REQUEST_INFO,
+];
+
+/** True when the decision needs `kybStatus = COMPLETED` first (APPROVE only). */
+export function requiresCompletedKyb(action: DecisionAction): boolean {
+  return action === TransitionAction.APPROVE;
+}
 
 /** One row of the transition table. */
 export interface Transition {

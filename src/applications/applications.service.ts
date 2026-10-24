@@ -19,6 +19,7 @@ import {
   isRoleAllowed,
   nextStatus,
   OPERATIONS,
+  requiresCompletedKyb,
   TransitionAction,
 } from './application-state-machine';
 import {
@@ -36,6 +37,7 @@ import {
 import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { DECISION_TO_ACTION, RecordDecisionDto } from './dto/record-decision.dto';
 import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UPDATABLE_FIELDS, UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
@@ -56,9 +58,14 @@ export const NOT_ASSIGNABLE_MESSAGE =
   'A reviewer can only be assigned in RISK_REVIEW, UNDER_REVIEW or INFO_REQUESTED';
 export const NOT_TRANSFERABLE_MESSAGE =
   'Ownership can only be transferred while the application is not APPROVED or REJECTED';
+export const NOT_DECIDABLE_MESSAGE = 'A decision can only be recorded in UNDER_REVIEW';
+export const NOTE_CONTAINS_RAW_ID_MESSAGE = 'note must not contain the tax ID or national ID';
+export const KYB_NOT_COMPLETED_MESSAGE =
+  'Application can only be approved after the KYB check has completed';
 
 export const INVALID_STATE_TRANSITION_CODE = 'INVALID_STATE_TRANSITION';
 export const CONCURRENT_MODIFICATION_CODE = 'CONCURRENT_MODIFICATION';
+export const KYB_NOT_COMPLETED_CODE = 'KYB_NOT_COMPLETED';
 
 // Copies one present field. Generic over the key, so the value keeps that field's type.
 function copyField<K extends keyof UpdateApplicationDto>(
@@ -77,15 +84,30 @@ interface SubmitResult {
 }
 
 /**
- * Create, list, read, edit and submit applications, plus the ADMIN-only `assignReviewer` and
- * `transferOwner` (docs/adrs/auth.md matrix, docs/adrs/workflow.md §1.2). Which statuses allow an
- * edit, an assign or a transfer, and which transitions exist, come from the state machine module
+ * Create, list, read, edit and submit applications, the ADMIN-only `assignReviewer` and
+ * `transferOwner`, and the assigned REVIEWER's `decide` (docs/adrs/auth.md matrix,
+ * docs/adrs/workflow.md §1.2). Which statuses allow an edit, an assign or a transfer, and which
+ * transitions exist, come from the state machine module
  * (`application-state-machine.ts`). Every read goes through the scoped
  * `ApplicationsRepository`; each write and its audit row share one transaction. Responses are
  * masked by `toApplicationResponse` (`toApplicationDetailResponse` for `get`). After a submit
  * commits, the KYB check job is enqueued through `KybCheckQueue` (docs/adrs/kyb-check.md).
  * Nothing here logs the payload.
  */
+// Lowercases and drops whitespace and dashes, so "PAN-1234" and "pan 1234" compare equal.
+function normaliseForIdMatch(value: string): string {
+  return value.replace(/[\s-]/g, '').toLowerCase();
+}
+
+/** True when the note contains the application's own full `taxId` or `ownerNationalId`. */
+function noteContainsRawId(note: string, app: MerchantApplication): boolean {
+  const normalisedNote = normaliseForIdMatch(note);
+  return [app.taxId, app.ownerNationalId].some((rawId) => {
+    const normalisedId = normaliseForIdMatch(rawId);
+    return normalisedId !== '' && normalisedNote.includes(normalisedId);
+  });
+}
+
 @Injectable()
 export class ApplicationsService {
   constructor(
@@ -375,6 +397,72 @@ export class ApplicationsService {
           entityType: AUDIT_ENTITY_TYPE,
           entityId: app.id,
           meta: { from: app.salesOwnerId, to: dto.salesOwnerId },
+        },
+        manager,
+      );
+      return toApplicationResponse(await this.reReadInTransaction(app.id, actor, manager));
+    });
+  }
+
+  /**
+   * DECISION (docs/adrs/workflow.md §1.2): the assigned REVIEWER records APPROVE, REJECT or
+   * REQUEST_INFO on an UNDER_REVIEW application. Order: role (403, before any DB work) → scoped
+   * read (404 when not assigned to the caller or unknown) → transition (409
+   * INVALID_STATE_TRANSITION) → APPROVE needs a completed KYB check (409 KYB_NOT_COMPLETED) →
+   * guarded write (409 CONCURRENT_MODIFICATION). The DECISION_RECORDED audit row shares the
+   * transaction. Nothing is enqueued and nothing is logged.
+   */
+  async decide(
+    id: string,
+    dto: RecordDecisionDto,
+    actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    const action = DECISION_TO_ACTION[dto.decision];
+    // Defence in depth behind @Roles: ADMIN and SALES → 403 before any DB work.
+    if (!isRoleAllowed(action, actor.role)) {
+      throw new ForbiddenException();
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const app = await this.applicationsRepository.findAccessible(id, actor, manager);
+      if (app === null) {
+        throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
+      }
+      const to = nextStatus(app.status, action);
+      if (to === null) {
+        throw this.conflict(NOT_DECIDABLE_MESSAGE, INVALID_STATE_TRANSITION_CODE);
+      }
+      // Checked after the transition, so a wrong status always reports INVALID_STATE_TRANSITION.
+      if (requiresCompletedKyb(action) && app.kybStatus !== KybStatus.COMPLETED) {
+        throw this.conflict(KYB_NOT_COMPLETED_MESSAGE, KYB_NOT_COMPLETED_CODE);
+      }
+      // The note is returned unmasked, so it must not carry this application's raw IDs
+      // (docs/adrs/sensitive-data.md). The message never echoes the note or the ID.
+      if (dto.note !== undefined && noteContainsRawId(dto.note, app)) {
+        throw new BadRequestException(NOTE_CONTAINS_RAW_ID_MESSAGE);
+      }
+      const decided = await this.applicationsRepository.decideIfAllowed(
+        app.id,
+        app.version,
+        action,
+        to,
+        dto.note ?? null,
+        actor,
+        manager,
+      );
+      if (!decided) {
+        throw this.conflict(CONCURRENT_MODIFICATION_MESSAGE, CONCURRENT_MODIFICATION_CODE);
+      }
+      // The note is deliberately not in meta: it is free text and may hold PII.
+      await this.auditLogService.record(
+        {
+          actorType: AuditActorType.USER,
+          actorId: actor.id,
+          actorRole: actor.role,
+          action: AuditAction.DECISION_RECORDED,
+          entityType: AUDIT_ENTITY_TYPE,
+          entityId: app.id,
+          meta: { decision: action, from: app.status, to },
         },
         manager,
       );
