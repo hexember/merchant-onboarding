@@ -1,0 +1,1817 @@
+{
+  "info": {
+    "name": "merchant-onboarding",
+    "description": "Local API walkthrough. Import with the environment from local.postman_environment.example.json, fill in the passwords, then run the collection in order. See docs/manual-testing.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Logs in each seeded role and caches its token until a minute before it expires, so any request",
+          "// can be sent on its own without logging in first. Credentials come from the environment.",
+          "const roles = ['sales', 'admin', 'reviewer'];",
+          "const now = Math.floor(Date.now() / 1000);",
+          "roles.forEach((role) => {",
+          "  const exp = Number(pm.collectionVariables.get(role + 'TokenExp') || 0);",
+          "  if (exp - 60 > now) {",
+          "    return;",
+          "  }",
+          "  const email = pm.environment.get(role + 'Email');",
+          "  const password = pm.environment.get(role + 'Password');",
+          "  if (!email || !password) {",
+          "    console.warn('Set ' + role + 'Email and ' + role + 'Password in the environment.');",
+          "    return;",
+          "  }",
+          "  pm.sendRequest(",
+          "    {",
+          "      url: pm.environment.get('baseUrl') + '/auth/login',",
+          "      method: 'POST',",
+          "      header: { 'Content-Type': 'application/json' },",
+          "      body: { mode: 'raw', raw: JSON.stringify({ email, password }) },",
+          "    },",
+          "    (err, res) => {",
+          "      if (err || res.code !== 200) {",
+          "        console.warn('Login failed for ' + role + ': ' + (err || res.code));",
+          "        return;",
+          "      }",
+          "      const token = res.json().accessToken;",
+          "      let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+          "      while (payload.length % 4 !== 0) {",
+          "        payload += '=';",
+          "      }",
+          "      const claims = JSON.parse(atob(payload));",
+          "      pm.collectionVariables.set(role + 'Token', token);",
+          "      pm.collectionVariables.set(role + 'TokenExp', String(claims.exp));",
+          "      pm.collectionVariables.set(role + 'Id', claims.sub);",
+          "    },",
+          "  );",
+          "});"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "salesToken",
+      "value": ""
+    },
+    {
+      "key": "salesTokenExp",
+      "value": ""
+    },
+    {
+      "key": "salesId",
+      "value": ""
+    },
+    {
+      "key": "adminToken",
+      "value": ""
+    },
+    {
+      "key": "adminTokenExp",
+      "value": ""
+    },
+    {
+      "key": "adminId",
+      "value": ""
+    },
+    {
+      "key": "reviewerToken",
+      "value": ""
+    },
+    {
+      "key": "reviewerTokenExp",
+      "value": ""
+    },
+    {
+      "key": "reviewerId",
+      "value": ""
+    },
+    {
+      "key": "applicationId",
+      "value": ""
+    },
+    {
+      "key": "deniedApplicationId",
+      "value": ""
+    },
+    {
+      "key": "kybPollTries",
+      "value": ""
+    },
+    {
+      "key": "kybStatus",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "description": "Optional: the collection logs every role in automatically before each request. These requests show the login response and refresh the saved tokens.",
+      "item": [
+        {
+          "name": "Login as SALES",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{salesEmail}}\",\n  \"password\": \"{{salesPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with an access token', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.accessToken).to.be.a('string');",
+                  "  pm.expect(body.expiresIn).to.eql(3600);",
+                  "});",
+                  "const token = pm.response.json().accessToken;",
+                  "let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+                  "while (payload.length % 4 !== 0) {",
+                  "  payload += '=';",
+                  "}",
+                  "const claims = JSON.parse(atob(payload));",
+                  "pm.collectionVariables.set('salesToken', token);",
+                  "pm.collectionVariables.set('salesTokenExp', String(claims.exp));",
+                  "pm.collectionVariables.set('salesId', claims.sub);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login as ADMIN",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with an access token', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.accessToken).to.be.a('string');",
+                  "  pm.expect(body.expiresIn).to.eql(3600);",
+                  "});",
+                  "const token = pm.response.json().accessToken;",
+                  "let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+                  "while (payload.length % 4 !== 0) {",
+                  "  payload += '=';",
+                  "}",
+                  "const claims = JSON.parse(atob(payload));",
+                  "pm.collectionVariables.set('adminToken', token);",
+                  "pm.collectionVariables.set('adminTokenExp', String(claims.exp));",
+                  "pm.collectionVariables.set('adminId', claims.sub);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login as REVIEWER",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{reviewerEmail}}\",\n  \"password\": \"{{reviewerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with an access token', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.accessToken).to.be.a('string');",
+                  "  pm.expect(body.expiresIn).to.eql(3600);",
+                  "});",
+                  "const token = pm.response.json().accessToken;",
+                  "let payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+                  "while (payload.length % 4 !== 0) {",
+                  "  payload += '=';",
+                  "}",
+                  "const claims = JSON.parse(atob(payload));",
+                  "pm.collectionVariables.set('reviewerToken', token);",
+                  "pm.collectionVariables.set('reviewerTokenExp', String(claims.exp));",
+                  "pm.collectionVariables.set('reviewerId', claims.sub);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wrong password → 401",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{salesEmail}}\",\n  \"password\": \"{{wrongPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A random wrong password, so no password is stored in the collection.",
+                  "pm.variables.set('wrongPassword', 'wrong-' + Math.random().toString(36).slice(2));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Happy path",
+      "description": "Run in order (Collection Runner). One application goes DRAFT → RISK_REVIEW → UNDER_REVIEW → INFO_REQUESTED → RISK_REVIEW → UNDER_REVIEW → APPROVED.",
+      "item": [
+        {
+          "name": "Create draft (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            },
+            "description": "No `salesOwnerId`: for SALES the owner comes from the token.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Grocers\",\n  \"legalBusinessName\": \"Example Grocers Pvt. Ltd.\",\n  \"businessType\": \"PRIVATE_LIMITED\",\n  \"registrationNumber\": \"REG-FAKE-0001\",\n  \"taxId\": \"PAN-FAKE-00001234\",\n  \"ownerFullName\": \"Jane Example\",\n  \"ownerEmail\": \"owner@example.com\",\n  \"ownerPhone\": \"+977-0000000123\",\n  \"ownerNationalId\": \"NID-FAKE-5678\",\n  \"merchantCategoryCode\": \"5411\",\n  \"websiteUrl\": \"https://shop.example.com\",\n  \"expectedMonthlyVolumeMinor\": 2500000,\n  \"averageTicketSizeMinor\": 150000,\n  \"currency\": \"NPR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 DRAFT owned by the SALES user', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('DRAFT');",
+                  "  pm.expect(body.salesOwnerId).to.eql(pm.collectionVariables.get('salesId'));",
+                  "});",
+                  "pm.test('Sensitive fields are masked', () => {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.taxId).to.eql('••••••1234');",
+                  "  pm.expect(body.ownerNationalId).to.eql('••••••5678');",
+                  "  pm.expect(body.ownerEmail).to.eql('o•••@example.com');",
+                  "  pm.expect(body.ownerPhone).to.eql('••••••123');",
+                  "});",
+                  "pm.collectionVariables.set('applicationId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Edit draft (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"averageTicketSizeMinor\": 175000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with the new value', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().averageTicketSizeMinor).to.eql(175000);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/submit",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "submit"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 RISK_REVIEW', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('RISK_REVIEW');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Assign reviewer (ADMIN)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "assign"
+              ]
+            },
+            "description": "`reviewerId` is the `sub` of the REVIEWER login token, saved by the login script. ADMIN can assign while the KYB check is still running.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewerId\": \"{{reviewerId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 assigned to the REVIEWER user', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().assignedReviewerId).to.eql(pm.collectionVariables.get('reviewerId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wait for KYB check (REVIEWER)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}"
+              ]
+            },
+            "description": "Repeats itself (Collection Runner / newman) every 2 seconds until the KYB check finishes. Sent by hand: send it again until `status` is `UNDER_REVIEW`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(200);",
+                  "const body = pm.response.json();",
+                  "const tries = Number(pm.collectionVariables.get('kybPollTries') || 0) + 1;",
+                  "if (body.status === 'RISK_REVIEW' && tries < 30) {",
+                  "  pm.collectionVariables.set('kybPollTries', String(tries));",
+                  "  console.log('KYB check still running, try ' + tries);",
+                  "  // pm.execution.setNextRequest is the newer name; older newman versions only have pm.setNextRequest.",
+                  "  if (pm.execution && typeof pm.execution.setNextRequest === 'function') {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  } else {",
+                  "    pm.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "  setTimeout(() => {}, 2000);",
+                  "} else {",
+                  "  pm.collectionVariables.set('kybPollTries', '0');",
+                  "  pm.collectionVariables.set('kybStatus', body.kybCheck.status);",
+                  "  pm.test('KYB check finished: UNDER_REVIEW', () => {",
+                  "    pm.expect(body.status).to.eql('UNDER_REVIEW');",
+                  "    pm.expect(['COMPLETED', 'FAILED']).to.include(body.kybCheck.status);",
+                  "  });",
+                  "  console.log('KYB check: ' + body.kybCheck.status + ', level ' + body.kybCheck.level + ' (' + body.kybCheck.label + '), score ' + body.kybCheck.score + ', attempts ' + body.kybCheck.attempts);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Note with the raw tax ID → 400 (REVIEWER)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/decision",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "decision"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"REQUEST_INFO\",\n  \"note\": \"Please confirm PAN-FAKE-00001234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Request info (REVIEWER)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/decision",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "decision"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"REQUEST_INFO\",\n  \"note\": \"Please confirm the website address.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 INFO_REQUESTED with the note', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('INFO_REQUESTED');",
+                  "  pm.expect(body.decisionNote).to.eql('Please confirm the website address.');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Edit after info request (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"websiteUrl\": \"https://grocers.example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with the new website', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().websiteUrl).to.eql('https://grocers.example.com');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resubmit (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/submit",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "submit"
+              ]
+            },
+            "description": "Starts a new KYB check."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 RISK_REVIEW', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('RISK_REVIEW');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wait for second KYB check (REVIEWER)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}"
+              ]
+            },
+            "description": "Repeats itself (Collection Runner / newman) every 2 seconds until the KYB check finishes. Sent by hand: send it again until `status` is `UNDER_REVIEW`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.response.to.have.status(200);",
+                  "const body = pm.response.json();",
+                  "const tries = Number(pm.collectionVariables.get('kybPollTries') || 0) + 1;",
+                  "if (body.status === 'RISK_REVIEW' && tries < 30) {",
+                  "  pm.collectionVariables.set('kybPollTries', String(tries));",
+                  "  console.log('KYB check still running, try ' + tries);",
+                  "  // pm.execution.setNextRequest is the newer name; older newman versions only have pm.setNextRequest.",
+                  "  if (pm.execution && typeof pm.execution.setNextRequest === 'function') {",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "  } else {",
+                  "    pm.setNextRequest(pm.info.requestName);",
+                  "  }",
+                  "  setTimeout(() => {}, 2000);",
+                  "} else {",
+                  "  pm.collectionVariables.set('kybPollTries', '0');",
+                  "  pm.collectionVariables.set('kybStatus', body.kybCheck.status);",
+                  "  pm.test('KYB check finished: UNDER_REVIEW', () => {",
+                  "    pm.expect(body.status).to.eql('UNDER_REVIEW');",
+                  "    pm.expect(['COMPLETED', 'FAILED']).to.include(body.kybCheck.status);",
+                  "  });",
+                  "  console.log('KYB check: ' + body.kybCheck.status + ', level ' + body.kybCheck.level + ' (' + body.kybCheck.label + '), score ' + body.kybCheck.score + ', attempts ' + body.kybCheck.attempts);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Approve (REVIEWER)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{applicationId}}/decision",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{applicationId}}",
+                "decision"
+              ]
+            },
+            "description": "Approve needs a completed KYB check. If the simulated provider failed all 5 attempts (rare), this returns 409 KYB_NOT_COMPLETED instead.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"APPROVE\",\n  \"note\": \"Checks look fine.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('kybStatus') === 'COMPLETED') {",
+                  "  pm.test('200 APPROVED', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.status).to.eql('APPROVED');",
+                  "    pm.expect(body.decidedAt).to.be.a('string');",
+                  "  });",
+                  "} else {",
+                  "  pm.test('409 KYB_NOT_COMPLETED (the KYB check failed)', () => {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().code).to.eql('KYB_NOT_COMPLETED');",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List approved applications (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications?status=APPROVED&page=1&limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "APPROVED"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and only APPROVED items', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.items.every((item) => item.status === 'APPROVED')).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Denied cases",
+      "description": "Each request checks that the API refuses it with the expected status. Uses its own draft application.",
+      "item": [
+        {
+          "name": "Create draft for denied cases (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Books\",\n  \"legalBusinessName\": \"Example Books Pvt. Ltd.\",\n  \"businessType\": \"PRIVATE_LIMITED\",\n  \"registrationNumber\": \"REG-FAKE-0002\",\n  \"taxId\": \"PAN-FAKE-00002222\",\n  \"ownerFullName\": \"John Example\",\n  \"ownerEmail\": \"books.owner@example.com\",\n  \"ownerPhone\": \"+977-0000000123\",\n  \"ownerNationalId\": \"NID-FAKE-2222\",\n  \"merchantCategoryCode\": \"5942\",\n  \"websiteUrl\": \"https://shop.example.com\",\n  \"expectedMonthlyVolumeMinor\": 2500000,\n  \"averageTicketSizeMinor\": 150000,\n  \"currency\": \"NPR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 DRAFT', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "pm.collectionVariables.set('deniedApplicationId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "No token → 401",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Tampered token → 401",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The SALES token with its last signature character changed.",
+                  "const token = pm.collectionVariables.get('salesToken') || '';",
+                  "const last = token.slice(-1) === 'A' ? 'B' : 'A';",
+                  "pm.request.headers.upsert({ key: 'Authorization', value: 'Bearer ' + token.slice(0, -1) + last });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SALES sends salesOwnerId → 403",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Books\",\n  \"legalBusinessName\": \"Example Books Pvt. Ltd.\",\n  \"businessType\": \"PRIVATE_LIMITED\",\n  \"registrationNumber\": \"REG-FAKE-0003\",\n  \"taxId\": \"PAN-FAKE-00003333\",\n  \"ownerFullName\": \"John Example\",\n  \"ownerEmail\": \"books.owner@example.com\",\n  \"ownerPhone\": \"+977-0000000123\",\n  \"ownerNationalId\": \"NID-FAKE-3333\",\n  \"merchantCategoryCode\": \"5942\",\n  \"expectedMonthlyVolumeMinor\": 2500000,\n  \"averageTicketSizeMinor\": 150000,\n  \"salesOwnerId\": \"{{salesId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', () => {",
+                  "  pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ADMIN without salesOwnerId → 400",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Books\",\n  \"legalBusinessName\": \"Example Books Pvt. Ltd.\",\n  \"businessType\": \"PRIVATE_LIMITED\",\n  \"registrationNumber\": \"REG-FAKE-0002\",\n  \"taxId\": \"PAN-FAKE-00002222\",\n  \"ownerFullName\": \"John Example\",\n  \"ownerEmail\": \"books.owner@example.com\",\n  \"ownerPhone\": \"+977-0000000123\",\n  \"ownerNationalId\": \"NID-FAKE-2222\",\n  \"merchantCategoryCode\": \"5942\",\n  \"websiteUrl\": \"https://shop.example.com\",\n  \"expectedMonthlyVolumeMinor\": 2500000,\n  \"averageTicketSizeMinor\": 150000,\n  \"currency\": \"NPR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "REVIEWER creates → 403",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Books\",\n  \"legalBusinessName\": \"Example Books Pvt. Ltd.\",\n  \"businessType\": \"PRIVATE_LIMITED\",\n  \"registrationNumber\": \"REG-FAKE-0002\",\n  \"taxId\": \"PAN-FAKE-00002222\",\n  \"ownerFullName\": \"John Example\",\n  \"ownerEmail\": \"books.owner@example.com\",\n  \"ownerPhone\": \"+977-0000000123\",\n  \"ownerNationalId\": \"NID-FAKE-2222\",\n  \"merchantCategoryCode\": \"5942\",\n  \"websiteUrl\": \"https://shop.example.com\",\n  \"expectedMonthlyVolumeMinor\": 2500000,\n  \"averageTicketSizeMinor\": 150000,\n  \"currency\": \"NPR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', () => {",
+                  "  pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown field → 400",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"APPROVED\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown application id → 404",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/00000000-0000-4000-8000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "00000000-0000-4000-8000-000000000000"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "REVIEWER views an unassigned application → 404",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{reviewerToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SALES records a decision → 403",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/decision",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "decision"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"APPROVE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', () => {",
+                  "  pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "SALES assigns a reviewer → 403",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "assign"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewerId\": \"{{reviewerId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', () => {",
+                  "  pm.response.to.have.status(403);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ADMIN assigns a DRAFT → 409",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "assign"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewerId\": \"{{reviewerId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 INVALID_STATE_TRANSITION', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().code).to.eql('INVALID_STATE_TRANSITION');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ADMIN assigns a non-REVIEWER user → 400",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/assign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "assign"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewerId\": \"{{salesId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => {",
+                  "  pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit the denied-case draft (SALES)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/submit",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "submit"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 RISK_REVIEW', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit twice → 409",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}/submit",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}",
+                "submit"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 INVALID_STATE_TRANSITION', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().code).to.eql('INVALID_STATE_TRANSITION');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Edit after submit → 409",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{salesToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/applications/{{deniedApplicationId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "applications",
+                "{{deniedApplicationId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Example Books Renamed\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 INVALID_STATE_TRANSITION', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().code).to.eql('INVALID_STATE_TRANSITION');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

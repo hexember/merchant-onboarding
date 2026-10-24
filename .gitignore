@@ -7,6 +7,8 @@ dev.notes/
 !.env.example
 *.pem
 *.key
+# Postman environments with real passwords (the .example.json template is committed)
+*.postman_environment.json
 
 # Dependencies
 node_modules/
