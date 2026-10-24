@@ -193,7 +193,7 @@ describe('Logging (e2e)', () => {
   });
 });
 
-// Runs the built entry points in a child process with an invalid env and checks that the
+// Runs the built app entry point in a child process with an invalid env and checks that the
 // failure is exactly one JSON line on stderr. The child gets a fixed, fake env (never the
 // developer's values) and runs in an empty temporary directory, so no .env file is loaded.
 describe('Startup failure output (spawned process)', () => {
@@ -222,7 +222,6 @@ describe('Startup failure output (spawned process)', () => {
   });
 
   it.each<[string, string, string]>([
-    ['the seed', 'database/seeds/seed.js', 'Seed failed'],
     ['the app', 'main.js', 'Startup failed'],
   ])(
     'denied: %s with an invalid env writes one JSON line to stderr, no stack, exit code 1',

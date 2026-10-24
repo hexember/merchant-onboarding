@@ -20,7 +20,7 @@
   matched route pattern (`/applications/:id`, or `[unmatched]`; never the raw path), status and
   `code`. Its response never echoes internals or input: every 5xx body is the generic status
   text, and the framework 400s for a malformed JSON body or URL parameter get a fixed message.
-  If the app or the seed fails before its Nest context exists, Nest's buffered startup lines are
+  If the app fails before its Nest context exists, Nest's buffered startup lines are
   dropped (`autoFlushLogs: false`) and one line is written through the same JSON console writer,
   using `serializeError` without a stack.
 - **Would need field-level encryption** (documented, not implemented): `tax_id`,

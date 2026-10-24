@@ -55,7 +55,7 @@ not scanned: put values in `meta` under a key, never in the message. Database qu
 logged as `Database query failed` plus their SQLSTATE `code`, because the driver's message can
 echo input values. Request failures log the matched route pattern (for example
 `/applications/:id`, or `[unmatched]`), never the raw path. A 5xx response body is always the
-generic status text. If the app or the seed fails to start, exactly one JSON line is written to
+generic status text. If the app fails to start, exactly one JSON line is written to
 stderr and the process exits with code 1. To add an
 output, implement `LogTransport` and add it to the `LOG_TRANSPORTS` factory in
 `src/logging/logging.module.ts`.

@@ -637,3 +637,9 @@ failures.
   header line is rewritten the same way. Leftover string arguments are dropped and counted in
   `meta.droppedValues`.
 - L5: the phone fixture is now `'+1-555-0100-123'`.
+
+## Revision: seed left unchanged
+
+The seed changes are removed from this task to keep it small. `seed.ts` and `seed.module.ts` stay
+as on `main` (its own `describeError` logging), `report-seed-error.ts` and its spec are dropped,
+and the spawn e2e test covers only the app. Seed steps and notes above are superseded.
