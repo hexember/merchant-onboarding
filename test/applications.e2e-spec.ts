@@ -1,7 +1,9 @@
+import { getQueueToken } from '@nestjs/bullmq';
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import * as bcrypt from 'bcrypt';
+import { Queue } from 'bullmq';
 import * as request from 'supertest';
 import { App } from 'supertest/types';
 import { DataSource, UpdateQueryBuilder } from 'typeorm';
@@ -21,6 +23,8 @@ import { AuditLogService } from '../src/audit/audit-log.service';
 import { UserRole } from '../src/common/common.enums';
 import { BCRYPT_COST } from '../src/common/password';
 import { setupSwagger } from '../src/common/swagger';
+import { KYB_CHECK_QUEUE, kybCheckJobId } from '../src/kyb/kyb-job';
+import { configureLogger } from '../src/logging/logger';
 import { UsersRepository } from '../src/users/users.repository';
 import { resetApplicationData, resetTables } from './utils/test-db';
 
@@ -91,6 +95,11 @@ const RESPONSE_KEYS = [
   'updatedAt',
 ];
 
+// GET /applications/:id adds the kybCheck block (docs/adrs/workflow.md §1.4); no other response does.
+const DETAIL_RESPONSE_KEYS = [...RESPONSE_KEYS, 'kybCheck'];
+
+const ENQUEUE_FAILED_MESSAGE = 'KYB check could not be enqueued; application stays in RISK_REVIEW';
+
 // The SET clause (SQL text before WHERE) of the single SUBMIT UPDATE TypeORM builds: one version
 // and one updated_at assignment, no auto-added ones.
 const SUBMIT_SET_CLAUSE =
@@ -136,6 +145,19 @@ interface ApplicationBody {
   expectedMonthlyVolumeMinor: number;
   averageTicketSizeMinor: number;
   currency: string;
+}
+
+interface KybCheckBody {
+  status: string;
+  level: string | null;
+  label: string | null;
+  score: number | null;
+  attempts: number;
+  lastAttemptAt: string | null;
+}
+
+interface DetailBody extends ApplicationBody {
+  kybCheck: KybCheckBody;
 }
 
 interface ListBody {
@@ -222,14 +244,23 @@ describe('Applications (e2e)', () => {
   let reviewerToken: string;
   let reviewer2Token: string;
   let adminToken: string;
+  let queue: Queue;
   let stdout: jest.SpyInstance;
   let stderr: jest.SpyInstance;
+  // The logger prints through console.log / console.error, which Jest buffers per file, so the
+  // stream spies alone would miss those lines.
+  let consoleLog: jest.SpyInstance;
+  let consoleError: jest.SpyInstance;
   // Every response body of the current test, for the leak checks.
   let responseTexts: string[];
 
   beforeAll(async () => {
     stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     stderr = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    consoleLog = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    // Logger on, after every spy is installed, so the log checks below see real output.
+    configureLogger({ production: false });
     const module: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -237,6 +268,9 @@ describe('Applications (e2e)', () => {
     setupSwagger(app, true);
     await app.init();
     dataSource = app.get(DataSource);
+    queue = app.get<Queue>(getQueueToken(KYB_CHECK_QUEUE));
+    // Connected before the first submit, so it never races the connect into the enqueue timeout.
+    await queue.waitUntilReady();
 
     // A missing variable fails here and names it. Each password is hashed once.
     const config = app.get(ConfigService);
@@ -272,9 +306,14 @@ describe('Applications (e2e)', () => {
   });
 
   afterAll(async () => {
+    // The queue prefix is unique to this run; this removes the jobs this spec enqueued.
+    await queue.obliterate({ force: true });
     await app.close();
+    configureLogger({ production: true });
     stdout.mockRestore();
     stderr.mockRestore();
+    consoleLog.mockRestore();
+    consoleError.mockRestore();
   });
 
   beforeEach(async () => {
@@ -283,6 +322,8 @@ describe('Applications (e2e)', () => {
     responseTexts = [];
     stdout.mockClear();
     stderr.mockClear();
+    consoleLog.mockClear();
+    consoleError.mockClear();
   });
 
   function server(): App {
@@ -380,7 +421,9 @@ describe('Applications (e2e)', () => {
   }
 
   // Captures the SQL text of every UPDATE on merchant_applications built while `run` executes.
-  async function capturingUpdates<T>(run: () => Promise<T>): Promise<{ result: T; updates: string[] }> {
+  async function capturingUpdates<T>(
+    run: () => Promise<T>,
+  ): Promise<{ result: T; updates: string[] }> {
     const sqlSpy = jest.spyOn(UpdateQueryBuilder.prototype, 'getQueryAndParameters');
     try {
       const result = await run();
@@ -411,14 +454,30 @@ describe('Applications (e2e)', () => {
     return spy.mock.calls.map((call: unknown[]) => String(call[0]));
   }
 
-  // Everything written to stdout and stderr since the last mockClear.
+  // Everything written to stdout, stderr, console.log and console.error since the last mockClear.
   function capturedText(): string {
-    return [...chunks(stdout), ...chunks(stderr)].join('');
+    return [
+      ...chunks(stdout),
+      ...chunks(stderr),
+      ...chunks(consoleLog),
+      ...chunks(consoleError),
+    ].join('\n');
   }
 
-  function expectMasked(body: ApplicationBody): void {
+  function expectMasked(body: ApplicationBody, keys: string[] = RESPONSE_KEYS): void {
     expect(body).toMatchObject(MASKED);
-    expect(Object.keys(body)).toEqual(RESPONSE_KEYS);
+    expect(Object.keys(body)).toEqual(keys);
+  }
+
+  // The KYB job for one submission, or undefined when none was enqueued.
+  async function kybJob(id: string, submissionNo: number): Promise<unknown> {
+    return queue.getJob(kybCheckJobId(id, submissionNo));
+  }
+
+  async function expectNoKybJob(id: string): Promise<void> {
+    for (const n of [1, 2]) {
+      await expect(kybJob(id, n)).resolves.toBeUndefined();
+    }
   }
 
   describe('POST /applications', () => {
@@ -583,7 +642,7 @@ describe('Applications (e2e)', () => {
       const body = res.body as ListBody;
       expect(body).toMatchObject({ page: 1, limit: 20, total: 2 });
       expect(body.items.map((item) => item.id)).toEqual([a2.id, a1.id]);
-      body.items.forEach(expectMasked);
+      body.items.forEach((item) => expectMasked(item));
     });
 
     it('REVIEWER sees only rows assigned to them; another reviewer sees none', async () => {
@@ -657,7 +716,7 @@ describe('Applications (e2e)', () => {
 
       const assigned = await get(reviewerToken, `/applications/${a.id}`);
       expect(assigned.status).toBe(200);
-      expectMasked(assigned.body as ApplicationBody);
+      expectMasked(assigned.body as ApplicationBody, DETAIL_RESPONSE_KEYS);
 
       const other = await get(reviewer2Token, `/applications/${a.id}`);
       expect(other.status).toBe(404);
@@ -670,7 +729,7 @@ describe('Applications (e2e)', () => {
       for (const token of [salesAToken, adminToken]) {
         const res = await get(token, `/applications/${a.id}`);
         expect(res.status).toBe(200);
-        expectMasked(res.body as ApplicationBody);
+        expectMasked(res.body as ApplicationBody, DETAIL_RESPONSE_KEYS);
         expect((res.body as ApplicationBody).id).toBe(a.id);
       }
     });
@@ -680,6 +739,60 @@ describe('Applications (e2e)', () => {
 
       expect(res.status).toBe(401);
       expect(res.body).toEqual(UNAUTHORIZED_BODY);
+    });
+
+    it('after a submit, kybCheck is PENDING with no level, label, score or attempts', async () => {
+      const a = await createAs(salesAToken);
+      expect((await submit(salesAToken, a.id)).status).toBe(200);
+
+      const res = await get(salesAToken, `/applications/${a.id}`);
+
+      expect(res.status).toBe(200);
+      const body = res.body as DetailBody;
+      expectMasked(body, DETAIL_RESPONSE_KEYS);
+      expect(body.kybCheck).toEqual({
+        status: 'PENDING',
+        level: null,
+        label: null,
+        score: null,
+        attempts: 0,
+        lastAttemptAt: null,
+      });
+    });
+
+    it('a completed KYB result shows its derived label; list items have no kybCheck', async () => {
+      const a = await createAs(salesAToken);
+      const lastAttemptAt = new Date('2026-01-01T00:00:00.000Z');
+      await forceState(a.id, {
+        status: 'UNDER_REVIEW',
+        kybStatus: 'COMPLETED',
+        kybLevel: 'HIGH',
+        kybScore: 78,
+        kybAttempts: 2,
+        kybLastAttemptAt: lastAttemptAt,
+        submissionCount: 1,
+      });
+
+      const res = await get(salesAToken, `/applications/${a.id}`);
+
+      expect(res.status).toBe(200);
+      const body = res.body as DetailBody;
+      expectMasked(body, DETAIL_RESPONSE_KEYS);
+      expect(body.kybCheck).toEqual({
+        status: 'COMPLETED',
+        level: 'HIGH',
+        label: 'Needs double check',
+        score: 78,
+        attempts: 2,
+        lastAttemptAt: lastAttemptAt.toISOString(),
+      });
+
+      const list = (await get(salesAToken, '/applications')).body as ListBody;
+      expect(list.items.map((item) => item.id)).toEqual([a.id]);
+      for (const item of list.items) {
+        expectMasked(item);
+        expect(item).not.toHaveProperty('kybCheck');
+      }
     });
   });
 
@@ -891,6 +1004,15 @@ describe('Applications (e2e)', () => {
         entity_id: a.id,
         meta: { from: 'DRAFT', to: 'RISK_REVIEW', submissionNo: 1 },
       });
+
+      // One KYB job for this submission, with the shipped options (docs/adrs/kyb-check.md).
+      const job = await queue.getJob(kybCheckJobId(a.id, 1));
+      expect(job).toBeDefined();
+      expect(job?.data).toEqual({ applicationId: a.id, submissionNo: 1 });
+      expect(job?.opts.attempts).toBe(5);
+      expect(job?.opts.backoff).toEqual({ type: 'exponential', delay: 2000 });
+      expect(job?.opts.removeOnComplete).toEqual({ age: 7 * 24 * 3600 });
+      expect(job?.opts.removeOnFail).toEqual({ age: 30 * 24 * 3600 });
     });
 
     it('ADMIN resubmits from INFO_REQUESTED: previous KYB result cleared, counter 2, reviewer kept', async () => {
@@ -932,6 +1054,9 @@ describe('Applications (e2e)', () => {
         entity_id: a.id,
         meta: { from: 'INFO_REQUESTED', to: 'RISK_REVIEW', submissionNo: 2 },
       });
+      const job = await queue.getJob(kybCheckJobId(a.id, 2));
+      expect(job?.data).toEqual({ applicationId: a.id, submissionNo: 2 });
+      await expect(kybJob(a.id, 1)).resolves.toBeUndefined();
     });
 
     it("ADMIN submits SALES B's DRAFT: 200", async () => {
@@ -961,6 +1086,7 @@ describe('Applications (e2e)', () => {
       }
       await expect(applicationRow(b.id)).resolves.toEqual(before);
       await expect(auditRows()).resolves.toEqual(auditsBefore);
+      await expectNoKybJob(b.id);
     });
 
     it('denied: REVIEWER, even the assigned one, gets 403; on an unknown id too', async () => {
@@ -977,6 +1103,7 @@ describe('Applications (e2e)', () => {
       }
       await expect(applicationRow(a.id)).resolves.toEqual(before);
       expect((await auditRows()).map((entry) => entry.action)).toEqual(['APPLICATION_CREATED']);
+      await expectNoKybJob(a.id);
     });
 
     it.each(['RISK_REVIEW', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'])(
@@ -992,6 +1119,7 @@ describe('Applications (e2e)', () => {
         expect(res.body).toEqual(NOT_SUBMITTABLE_BODY);
         await expect(applicationRow(a.id)).resolves.toEqual(before);
         expect((await auditRows()).map((entry) => entry.action)).toEqual(['APPLICATION_CREATED']);
+        await expectNoKybJob(a.id);
       },
     );
 
@@ -1005,6 +1133,9 @@ describe('Applications (e2e)', () => {
       expect(again.body).toEqual(NOT_SUBMITTABLE_BODY);
       await expect(applicationRow(a.id)).resolves.toMatchObject({ submission_count: 1 });
       await expect(submittedAuditCount()).resolves.toBe(1);
+      // Only the first submit enqueued; the 409 added no job.
+      await expect(kybJob(a.id, 1)).resolves.toBeDefined();
+      await expect(kybJob(a.id, 2)).resolves.toBeUndefined();
     });
 
     it('denied: PATCH after a real submit gets 409 NOT_EDITABLE', async () => {
@@ -1160,6 +1291,63 @@ describe('Applications (e2e)', () => {
         version: 1,
       });
       expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+      // The transaction rolled back, so nothing was enqueued.
+      await expectNoKybJob(a.id);
+    });
+  });
+
+  describe('KYB enqueue after submit', () => {
+    it('enqueues strictly after the commit: the job sees the committed row', async () => {
+      const a = await createAs(salesAToken);
+      const realAdd = queue.add.bind(queue);
+      const seen: Array<{ status: string; submission_count: number }> = [];
+      const spy = jest.spyOn(queue, 'add').mockImplementationOnce(async (name, data, opts) => {
+        // A separate pooled connection: it only sees committed data.
+        const rows: Array<{ status: string; submission_count: number }> = await dataSource.query(
+          'SELECT status, submission_count FROM merchant_applications WHERE id = $1',
+          [a.id],
+        );
+        seen.push(...rows);
+        return realAdd(name, data, opts);
+      });
+      let res: request.Response;
+      try {
+        res = await submit(salesAToken, a.id);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res.status).toBe(200);
+      expect(seen).toEqual([{ status: 'RISK_REVIEW', submission_count: 1 }]);
+      await expect(kybJob(a.id, 1)).resolves.toBeDefined();
+    });
+
+    it('a failed enqueue still returns 200, leaves RISK_REVIEW / PENDING and logs no PII', async () => {
+      const a = await createAs(salesAToken);
+      const spy = jest
+        .spyOn(queue, 'add')
+        .mockRejectedValueOnce(new Error('redis unavailable (test)'));
+      let res: request.Response;
+      try {
+        res = await submit(salesAToken, a.id);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res.status).toBe(200);
+      expect((res.body as ApplicationBody).status).toBe('RISK_REVIEW');
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        status: 'RISK_REVIEW',
+        kyb_status: 'PENDING',
+        submission_count: 1,
+      });
+      await expectNoKybJob(a.id);
+      // Positive check first, so the no-PII check below cannot pass on silent output.
+      const text = capturedText();
+      expect(text).toContain(ENQUEUE_FAILED_MESSAGE);
+      for (const secret of [RAW_TAX_ID, RAW_NATIONAL_ID, RAW_OWNER_EMAIL, RAW_OWNER_PHONE]) {
+        expect(text).not.toContain(secret);
+      }
     });
   });
 
@@ -1220,5 +1408,9 @@ describe('Applications (e2e)', () => {
       expect(operation).toBeDefined();
       expect(operation?.security).toEqual([{ bearer: [] }]);
     }
+    // KYB_COMPLETE is system only: no route mentions kyb.
+    expect(Object.keys(body.paths).filter((path) => path.toLowerCase().includes('kyb'))).toEqual(
+      [],
+    );
   });
 });

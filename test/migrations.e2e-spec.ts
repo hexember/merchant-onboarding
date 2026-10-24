@@ -1,7 +1,7 @@
 import { DataSource } from 'typeorm';
 import { createTestDataSource } from './utils/test-db';
 
-// Proves all three migrations revert cleanly. The suite shares one test database, so afterAll always
+// Proves all four migrations revert cleanly. The suite shares one test database, so afterAll always
 // re-runs the migrations, even when an assertion fails, and later spec files find it migrated.
 describe('Migrations (e2e)', () => {
   let dataSource: DataSource;
@@ -27,10 +27,20 @@ describe('Migrations (e2e)', () => {
   }
 
   it('reverting every migration removes every table, type and function', async () => {
+    // Newest first: CreateKybChecks drops only kyb_checks. The kyb_level type it reuses belongs to
+    // CreateMerchantApplications, whose down drops it.
+    await dataSource.undoLastMigration();
+    await expect(regclass('kyb_checks')).resolves.toBeNull();
+    await expect(regclass('merchant_applications')).resolves.toBe('merchant_applications');
+    const kybLevel: unknown[] = await dataSource.query(
+      `SELECT typname FROM pg_type WHERE typname = 'kyb_level'`,
+    );
+    expect(kybLevel).toEqual([{ typname: 'kyb_level' }]);
     await dataSource.undoLastMigration();
     await dataSource.undoLastMigration();
     await dataSource.undoLastMigration();
 
+    await expect(regclass('kyb_checks')).resolves.toBeNull();
     await expect(regclass('users')).resolves.toBeNull();
     await expect(regclass('audit_logs')).resolves.toBeNull();
     await expect(regclass('merchant_applications')).resolves.toBeNull();
@@ -44,11 +54,12 @@ describe('Migrations (e2e)', () => {
     expect(functions).toEqual([]);
   });
 
-  it('running the migrations again restores all three tables', async () => {
+  it('running the migrations again restores all four tables', async () => {
     await dataSource.runMigrations();
 
     await expect(regclass('users')).resolves.toBe('users');
     await expect(regclass('audit_logs')).resolves.toBe('audit_logs');
     await expect(regclass('merchant_applications')).resolves.toBe('merchant_applications');
+    await expect(regclass('kyb_checks')).resolves.toBe('kyb_checks');
   });
 });

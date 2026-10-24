@@ -1,4 +1,9 @@
-import { ensureTestJwtSecret, resolveTestDatabaseEnv } from './setup/test-env';
+import {
+  applyTestDatabaseEnv,
+  ensureTestJwtSecret,
+  ensureTestQueuePrefix,
+  resolveTestDatabaseEnv,
+} from './setup/test-env';
 
 // Pure guard tests (no database). The harness drops DB_NAME_TEST, so these prove it refuses
 // anything that is not clearly a separate, local test database.
@@ -137,5 +142,44 @@ describe('ensureTestJwtSecret', () => {
 
     expect(ensureTestJwtSecret({ JWT_SECRET: '' }, generate)).toBe(GENERATED);
     expect(generate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ensureTestQueuePrefix', () => {
+  const GENERATED = 'mo-e2e-fixture';
+
+  it('keeps an existing mo-e2e- value and does not call the generator', () => {
+    const generate = jest.fn(() => GENERATED);
+
+    expect(ensureTestQueuePrefix({ QUEUE_PREFIX: 'mo-e2e-abcd1234' }, generate)).toBe(
+      'mo-e2e-abcd1234',
+    );
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, string | undefined]>([
+    ['unset', undefined],
+    ['empty', ''],
+    ['a dev value (bull)', 'bull'],
+  ])('replaces a QUEUE_PREFIX that is %s', (_label, value) => {
+    const generate = jest.fn(() => GENERATED);
+
+    expect(ensureTestQueuePrefix({ QUEUE_PREFIX: value }, generate)).toBe(GENERATED);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('generates a mo-e2e- value by default', () => {
+    expect(ensureTestQueuePrefix({})).toMatch(/^mo-e2e-[0-9a-f]{8}$/);
+  });
+});
+
+describe('applyTestDatabaseEnv', () => {
+  it('turns the KYB worker off and keeps a mo-e2e- queue prefix', () => {
+    process.env.KYB_WORKER_ENABLED = 'true';
+
+    applyTestDatabaseEnv();
+
+    expect(process.env.KYB_WORKER_ENABLED).toBe('false');
+    expect(process.env.QUEUE_PREFIX).toMatch(/^mo-e2e-/);
   });
 });

@@ -2,6 +2,7 @@ import { DataSourceOptions } from 'typeorm';
 import { MerchantApplication } from '../applications/merchant-application.entity';
 import { AuditLog } from '../audit/audit-log.entity';
 import { AppEnv } from '../config/env.validation';
+import { KybCheck } from '../kyb/kyb-check.entity';
 import { User } from '../users/user.entity';
 import { migrations } from './migrations';
 
@@ -21,7 +22,7 @@ export function createDataSourceOptions(env: DatabaseEnv): DataSourceOptions {
     username: env.DB_USER,
     password: env.DB_PASSWORD,
     database: env.DB_NAME,
-    entities: [User, AuditLog, MerchantApplication],
+    entities: [User, AuditLog, MerchantApplication, KybCheck],
     migrations,
     synchronize: false,
     migrationsRun: false,

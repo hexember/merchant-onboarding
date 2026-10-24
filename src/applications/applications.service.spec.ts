@@ -9,8 +9,9 @@ import { AuditAction, AuditActorType } from '../audit/audit.enums';
 import { AuditEntry, AuditLogService } from '../audit/audit-log.service';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
+import { KybCheckQueue } from '../kyb/kyb-check.queue';
 import { UsersRepository } from '../users/users.repository';
-import { ApplicationStatus, BusinessType, KybStatus } from './application.enums';
+import { ApplicationStatus, BusinessType, KybLevel, KybStatus } from './application.enums';
 import { ApplicationsRepository, NewApplication } from './applications.repository';
 import {
   APPLICATION_NOT_FOUND_MESSAGE,
@@ -85,6 +86,8 @@ function fakeApplication(overrides: Partial<MerchantApplication> = {}): Merchant
     kybStatus: KybStatus.NOT_STARTED,
     kybLevel: null,
     kybScore: null,
+    kybAttempts: 0,
+    kybLastAttemptAt: null,
     submissionCount: 0,
     version: 1,
     meta: {},
@@ -105,6 +108,7 @@ interface Mocks {
   submitIfAllowed: jest.Mock;
   existsWithRole: jest.Mock;
   record: jest.Mock;
+  enqueue: jest.Mock;
 }
 
 function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
@@ -117,6 +121,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
   const submitIfAllowed = jest.fn().mockResolvedValue(true);
   const existsWithRole = jest.fn().mockResolvedValue(true);
   const record = jest.fn().mockResolvedValue(undefined);
+  const enqueue = jest.fn().mockResolvedValue(true);
   const service = new ApplicationsService(
     { transaction } as unknown as DataSource,
     {
@@ -128,6 +133,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     } as unknown as ApplicationsRepository,
     { existsWithRole } as unknown as UsersRepository,
     { record } as unknown as AuditLogService,
+    { enqueue } as unknown as KybCheckQueue,
   );
   return {
     service,
@@ -140,6 +146,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     submitIfAllowed,
     existsWithRole,
     record,
+    enqueue,
   };
 }
 
@@ -357,6 +364,34 @@ describe('ApplicationsService', () => {
       expect(response.ownerNationalId).toBe('••••••5678');
     });
 
+    it('returns the detail shape with the kybCheck block', async () => {
+      const lastAttemptAt = new Date('2026-01-02T00:00:00Z');
+      const { service } = setup(
+        fakeApplication({
+          status: ApplicationStatus.UNDER_REVIEW,
+          kybStatus: KybStatus.COMPLETED,
+          kybLevel: KybLevel.MEDIUM,
+          kybScore: 55,
+          kybAttempts: 1,
+          kybLastAttemptAt: lastAttemptAt,
+        }),
+      );
+
+      const response = await service.get(APP_ID, SALES);
+
+      expect(response.kybCheck).toEqual({
+        status: KybStatus.COMPLETED,
+        level: KybLevel.MEDIUM,
+        label: 'Fair deal',
+        score: 55,
+        attempts: 1,
+        lastAttemptAt,
+      });
+      expect(response.taxId).toBe('••••••1234');
+      expect(response).not.toHaveProperty('kybStatus');
+      expect(response).not.toHaveProperty('meta');
+    });
+
     it('out of scope or unknown → 404', async () => {
       const { service } = setup(null);
 
@@ -538,6 +573,47 @@ describe('ApplicationsService', () => {
     });
   });
 
+  describe('submit (no enqueue when the transaction rejects)', () => {
+    it('REVIEWER 403 → nothing enqueued', async () => {
+      const { service, enqueue } = setup();
+
+      await expect(service.submit(APP_ID, REVIEWER)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('404 → nothing enqueued', async () => {
+      const { service, enqueue } = setup(null);
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toBeInstanceOf(NotFoundException);
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('409 INVALID_STATE_TRANSITION → nothing enqueued', async () => {
+      const { service, enqueue } = setup(
+        fakeApplication({ status: ApplicationStatus.RISK_REVIEW }),
+      );
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toBeInstanceOf(ConflictException);
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('409 CONCURRENT_MODIFICATION → nothing enqueued', async () => {
+      const { service, submitIfAllowed, enqueue } = setup();
+      submitIfAllowed.mockResolvedValue(false);
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toBeInstanceOf(ConflictException);
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('audit failure (rolled back) → nothing enqueued', async () => {
+      const { service, record, enqueue } = setup();
+      record.mockRejectedValue(new Error('audit write failed'));
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toThrow('audit write failed');
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+  });
+
   describe('submit (allowed)', () => {
     it.each([
       [ApplicationStatus.DRAFT, SALES],
@@ -586,6 +662,52 @@ describe('ApplicationsService', () => {
       expect(response).not.toHaveProperty('meta');
       expect(response).not.toHaveProperty('version');
       expect(response).not.toHaveProperty('submissionCount');
+    });
+
+    it('enqueues the KYB check once with the read-back submissionNo, after the commit', async () => {
+      const { service, findAccessible, transaction, enqueue, manager } = setup();
+      // Records when the transaction promise settled, so the enqueue can be ordered against it.
+      const settled = jest.fn();
+      transaction.mockImplementation(async (run: (m: EntityManager) => Promise<unknown>) => {
+        const value = await run(manager);
+        settled();
+        return value;
+      });
+      findAccessible
+        .mockResolvedValueOnce(fakeApplication({ version: 5, submissionCount: 2 }))
+        .mockResolvedValueOnce(
+          fakeApplication({
+            status: ApplicationStatus.RISK_REVIEW,
+            version: 6,
+            submissionCount: 3,
+          }),
+        );
+
+      await service.submit(APP_ID, SALES);
+
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(enqueue).toHaveBeenCalledWith(APP_ID, 3);
+      const [settledOrder] = settled.mock.invocationCallOrder;
+      const [enqueueOrder] = enqueue.mock.invocationCallOrder;
+      expect(settledOrder).toBeDefined();
+      expect(enqueueOrder).toBeGreaterThan(settledOrder ?? Number.POSITIVE_INFINITY);
+    });
+
+    it('still resolves with the response when the enqueue fails (resolves false)', async () => {
+      const { service, findAccessible, enqueue } = setup();
+      enqueue.mockResolvedValue(false);
+      findAccessible
+        .mockResolvedValueOnce(fakeApplication())
+        .mockResolvedValueOnce(
+          fakeApplication({ status: ApplicationStatus.RISK_REVIEW, submissionCount: 1 }),
+        );
+
+      const response = await service.submit(APP_ID, SALES);
+
+      expect(enqueue).toHaveBeenCalledWith(APP_ID, 1);
+      expect(response.status).toBe(ApplicationStatus.RISK_REVIEW);
+      expect(response.taxId).toBe('••••••1234');
+      expect(response).not.toHaveProperty('kybCheck');
     });
 
     it('rejects when the audit write fails', async () => {
