@@ -93,3 +93,8 @@ Design decisions live in [docs/adrs/](docs/adrs/):
 - [auth.md](docs/adrs/auth.md): JWT login and the authorization matrix
 - [sensitive-data.md](docs/adrs/sensitive-data.md): redaction, masking and encryption candidates
 - [testing.md](docs/adrs/testing.md): test plan, including the denied cases
+
+## Before production
+
+Work that must be done before the project runs in production is tracked in
+[docs/production-readiness.md](docs/production-readiness.md).
