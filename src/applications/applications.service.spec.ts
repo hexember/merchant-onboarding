@@ -6,8 +6,14 @@ import {
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { DataSource, EntityManager } from 'typeorm';
-import { AuditAction, AuditActorType } from '../audit/audit.enums';
+import {
+  AuditAction,
+  AuditActorType,
+  MERCHANT_APPLICATION_ENTITY_TYPE,
+} from '../audit/audit.enums';
+import { AuditLog } from '../audit/audit-log.entity';
 import { AuditEntry, AuditLogService } from '../audit/audit-log.service';
+import { AuditLogQueryService } from '../audit/audit-log-query.service';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
 import { KybCheckQueue } from '../kyb/kyb-check.queue';
@@ -17,6 +23,7 @@ import { ApplicationsRepository, NewApplication } from './applications.repositor
 import {
   APPLICATION_NOT_FOUND_MESSAGE,
   ApplicationsService,
+  AUDIT_ENTITY_TYPE,
   CONCURRENT_MODIFICATION_CODE,
   CONCURRENT_MODIFICATION_MESSAGE,
   INVALID_STATE_TRANSITION_CODE,
@@ -34,6 +41,7 @@ import {
 } from './applications.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { ListAuditLogsQueryDto } from './dto/list-audit-logs-query.dto';
 import { DecisionType, RecordDecisionDto } from './dto/record-decision.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
@@ -123,6 +131,7 @@ interface Mocks {
   existsWithRole: jest.Mock;
   record: jest.Mock;
   enqueue: jest.Mock;
+  findApplicationHistoryPage: jest.Mock;
 }
 
 function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
@@ -139,6 +148,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
   const existsWithRole = jest.fn().mockResolvedValue(true);
   const record = jest.fn().mockResolvedValue(undefined);
   const enqueue = jest.fn().mockResolvedValue(true);
+  const findApplicationHistoryPage = jest.fn().mockResolvedValue({ items: [], total: 0 });
   const service = new ApplicationsService(
     { transaction } as unknown as DataSource,
     {
@@ -154,6 +164,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     { existsWithRole } as unknown as UsersRepository,
     { record } as unknown as AuditLogService,
     { enqueue } as unknown as KybCheckQueue,
+    { findApplicationHistoryPage } as unknown as AuditLogQueryService,
   );
   return {
     service,
@@ -170,6 +181,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     existsWithRole,
     record,
     enqueue,
+    findApplicationHistoryPage,
   };
 }
 
@@ -1363,5 +1375,125 @@ describe('ApplicationsService', () => {
         expect(onlyAuditEntry(record).action).toBe(AuditAction.DECISION_RECORDED);
       },
     );
+  });
+
+  describe('listAuditLogs', () => {
+    function auditQuery(page: number, limit: number): ListAuditLogsQueryDto {
+      return plainToInstance(ListAuditLogsQueryDto, { page: String(page), limit: String(limit) });
+    }
+
+    function auditRow(overrides: Partial<AuditLog> = {}): AuditLog {
+      return Object.assign(new AuditLog(), {
+        id: '00000000-0000-4000-8000-0000000000e1',
+        actorType: AuditActorType.USER,
+        actorId: SALES_ID,
+        actorRole: UserRole.SALES,
+        actorLabel: null,
+        action: AuditAction.APPLICATION_UPDATED,
+        entityType: MERCHANT_APPLICATION_ENTITY_TYPE,
+        entityId: APP_ID,
+        meta: { changedFields: ['taxId'] },
+        createdAt: new Date('2026-01-02T00:00:00Z'),
+        ...overrides,
+      });
+    }
+
+    it('AUDIT_ENTITY_TYPE is the shared MERCHANT_APPLICATION_ENTITY_TYPE', () => {
+      expect(AUDIT_ENTITY_TYPE).toBe(MERCHANT_APPLICATION_ENTITY_TYPE);
+    });
+
+    it.each([
+      ['REVIEWER', REVIEWER],
+      ['SALES', SALES],
+    ])('denied: %s → ForbiddenException before any DB work', async (_label, actor) => {
+      const { service, findAccessible, findApplicationHistoryPage, transaction } = setup();
+
+      await expect(service.listAuditLogs(APP_ID, auditQuery(1, 20), actor)).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(findAccessible).not.toHaveBeenCalled();
+      expect(findApplicationHistoryPage).not.toHaveBeenCalled();
+      expect(transaction).not.toHaveBeenCalled();
+    });
+
+    it('denied: ADMIN with an unknown id → NotFoundException, no audit read', async () => {
+      const { service, findAccessible, findApplicationHistoryPage } = setup(null);
+
+      const call = service.listAuditLogs(APP_ID, auditQuery(1, 20), ADMIN);
+
+      await expect(call).rejects.toBeInstanceOf(NotFoundException);
+      await expect(call).rejects.toThrow(APPLICATION_NOT_FOUND_MESSAGE);
+      expect(findAccessible).toHaveBeenCalledWith(APP_ID, ADMIN);
+      expect(findApplicationHistoryPage).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN: scoped read first, then the page for the id from the DB', async () => {
+      const { service, findAccessible, findApplicationHistoryPage, transaction } = setup();
+      const rows = [
+        auditRow(),
+        auditRow({
+          id: '00000000-0000-4000-8000-0000000000e2',
+          actorType: AuditActorType.SYSTEM,
+          actorId: null,
+          actorRole: null,
+          actorLabel: 'kyb-worker',
+          action: AuditAction.KYB_CHECK_COMPLETED,
+          meta: { submissionNo: 1 },
+        }),
+      ];
+      findApplicationHistoryPage.mockResolvedValue({ items: rows, total: 42 });
+      const pathId = APP_ID.toUpperCase();
+
+      const result = await service.listAuditLogs(pathId, auditQuery(3, 10), ADMIN);
+
+      expect(findAccessible).toHaveBeenCalledWith(pathId, ADMIN);
+      expect(findApplicationHistoryPage).toHaveBeenCalledTimes(1);
+      expect(findApplicationHistoryPage).toHaveBeenCalledWith(APP_ID, 3, 10);
+      const [accessibleOrder] = findAccessible.mock.invocationCallOrder as [number];
+      const [historyOrder] = findApplicationHistoryPage.mock.invocationCallOrder as [number];
+      expect(accessibleOrder).toBeLessThan(historyOrder);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        items: [
+          {
+            id: '00000000-0000-4000-8000-0000000000e1',
+            action: AuditAction.APPLICATION_UPDATED,
+            actorType: AuditActorType.USER,
+            actorId: SALES_ID,
+            actorRole: UserRole.SALES,
+            actorLabel: null,
+            createdAt: new Date('2026-01-02T00:00:00Z'),
+            meta: { changedFields: ['taxId'] },
+          },
+          {
+            id: '00000000-0000-4000-8000-0000000000e2',
+            action: AuditAction.KYB_CHECK_COMPLETED,
+            actorType: AuditActorType.SYSTEM,
+            actorId: null,
+            actorRole: null,
+            actorLabel: 'kyb-worker',
+            createdAt: new Date('2026-01-02T00:00:00Z'),
+            meta: { submissionNo: 1 },
+          },
+        ],
+        page: 3,
+        limit: 10,
+        total: 42,
+      });
+    });
+
+    it('items go through toAuditLogResponse: a raw taxId in meta comes back masked', async () => {
+      const { service, findApplicationHistoryPage } = setup();
+      findApplicationHistoryPage.mockResolvedValue({
+        items: [auditRow({ meta: { taxId: RAW_TAX_ID } })],
+        total: 1,
+      });
+
+      const result = await service.listAuditLogs(APP_ID, auditQuery(1, 20), ADMIN);
+
+      expect(result.items[0]?.meta).toEqual({ taxId: '••••••1234' });
+      expect(JSON.stringify(result)).not.toContain(RAW_TAX_ID);
+      expect(Object.keys(result.items[0] ?? {})).not.toContain('entityId');
+    });
   });
 });

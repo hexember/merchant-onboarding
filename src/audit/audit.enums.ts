@@ -18,3 +18,8 @@ export enum AuditAction {
   LOGIN_SUCCEEDED = 'LOGIN_SUCCEEDED',
   LOGIN_FAILED = 'LOGIN_FAILED',
 }
+
+// The `entity_type` of every audit row about a merchant application. The single source for the
+// writers (applications service, KYB worker) and the reader (AuditLogQueryService), so they cannot
+// drift apart. It lives in src/audit so the audit module never imports from applications.
+export const MERCHANT_APPLICATION_ENTITY_TYPE = 'merchant_application' as const;

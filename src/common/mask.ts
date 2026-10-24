@@ -34,17 +34,28 @@ export function maskPhone(value: string): string {
   return MASK + digits.slice(-3);
 }
 
-// Normalised key name → mask function.
-const MASKERS: ReadonlyMap<string, (value: string) => string> = new Map([
-  ['taxid', maskLast4],
-  ['ownernationalid', maskLast4],
-  ['owneremail', maskEmail],
-  ['email', maskEmail],
-  ['ownerphone', maskPhone],
-]);
+/**
+ * Picks the mask function for a key, or `undefined` if the key is not sensitive. Like `redact()`,
+ * it matches parts of the normalised key name (lowercased, `_` and `-` removed), so variants such
+ * as `oldTaxId`, `national_id`, `ownerEmailAddress` or `ownerPhoneNumber` are masked too. It errs
+ * on the side of masking too much: `emailVerified: true` becomes `MASK`.
+ */
+export function maskerForKey(key: string): ((value: string) => string) | undefined {
+  const normalized = normalizeKey(key);
+  if (normalized.includes('taxid') || normalized.includes('nationalid')) {
+    return maskLast4;
+  }
+  if (normalized.includes('email')) {
+    return maskEmail;
+  }
+  if (normalized.includes('phone')) {
+    return maskPhone;
+  }
+  return undefined;
+}
 
 /**
- * Returns a deep copy of `value` with sensitive keys masked at any depth. A non-string value
+ * Returns a deep copy of `value` with sensitive keys (see `maskerForKey`) masked at any depth. A non-string value
  * under a sensitive key becomes `MASK`. The input is never mutated. Any non-plain object (a class
  * instance, a `Map`, ...) is copied as a plain object of its own enumerable properties, so it is
  * masked like a plain object and never passed through as-is.
@@ -73,7 +84,7 @@ function maskValue(value: unknown, seen: WeakSet<object>): unknown {
     seen.add(value);
     const copy: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
-      const masker = MASKERS.get(normalizeKey(key));
+      const masker = maskerForKey(key);
       if (masker === undefined) {
         copy[key] = maskValue(child, seen);
       } else {

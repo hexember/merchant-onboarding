@@ -61,6 +61,27 @@ describe('maskSensitiveFields', () => {
     });
   });
 
+  it.each([
+    ['oldTaxId', 'TAX111122223333', '••••••3333'],
+    ['previousTaxId', 'TAX111122224444', '••••••4444'],
+    ['new_tax_id', 'TAX111122225555', '••••••5555'],
+    ['nationalId', 'NID000011116666', '••••••6666'],
+    ['national_id', 'NID000011117777', '••••••7777'],
+    ['ownerEmailAddress', 'jane@example.com', 'j•••@example.com'],
+    ['contactEmail', 'sam@example.com', 's•••@example.com'],
+    ['phone', '+977-9800000321', '••••••321'],
+    ['ownerPhoneNumber', '+977-9800000654', '••••••654'],
+  ])('masks %p because its name contains a sensitive part', (key, raw, masked) => {
+    expect(maskSensitiveFields({ [key]: raw, keep: 'ok' })).toEqual({ [key]: masked, keep: 'ok' });
+  });
+
+  it('masks a non-string value under a substring-matched key as MASK', () => {
+    expect(maskSensitiveFields({ emailVerified: true, previousTaxId: 42 })).toEqual({
+      emailVerified: MASK,
+      previousTaxId: MASK,
+    });
+  });
+
   it('leaves other keys unchanged', () => {
     const input = { name: 'Riley Reviewer', count: 2, tags: ['a', 'b'] };
 

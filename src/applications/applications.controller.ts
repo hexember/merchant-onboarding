@@ -21,6 +21,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
+import { AuditLogListResponseDto } from '../audit/dto/audit-log-response.dto';
 import { AuthUser } from '../auth/auth-user';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -35,6 +36,7 @@ import {
 import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { ListAuditLogsQueryDto } from './dto/list-audit-logs-query.dto';
 import { RecordDecisionDto } from './dto/record-decision.dto';
 import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
@@ -84,6 +86,22 @@ export class ApplicationsController {
     @CurrentUser() actor: AuthUser,
   ): Promise<ApplicationDetailResponseDto> {
     return this.applicationsService.get(id, actor);
+  }
+
+  // Two path segments, so it does not clash with `GET :id`.
+  @Get(':id/audit-logs')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Audit history of one application, oldest first (ADMIN)' })
+  @ApiOkResponse({ type: AuditLogListResponseDto })
+  @ApiBadRequestResponse({ description: 'Invalid query parameters' })
+  @ApiForbiddenResponse({ description: 'Wrong role' })
+  @ApiNotFoundResponse({ description: 'Unknown id' })
+  listAuditLogs(
+    @Param('id') id: string,
+    @Query() query: ListAuditLogsQueryDto,
+    @CurrentUser() actor: AuthUser,
+  ): Promise<AuditLogListResponseDto> {
+    return this.applicationsService.listAuditLogs(id, query, actor);
   }
 
   @Patch(':id')
