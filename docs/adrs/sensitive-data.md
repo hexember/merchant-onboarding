@@ -3,8 +3,8 @@
 - **Never logged:** `password`, `passwordHash`, `accessToken`, the `Authorization` header and the JWT secret.
   A shared `redact()` helper (key-based denylist; a key is redacted when its lowercased name
   contains `password`, `secret`, `token`, `authorization`, `cookie`, `apikey`, `hash`, `jwt`,
-  `bearer`, `credential` or `privatekey`) is applied in the request-logging interceptor,
-  in the exception filter and before audit `meta` is written.
+  `bearer`, `credential` or `privatekey`) runs, with the mask helpers, on `meta` inside
+  `logInfo` / `logError` (`src/logging/logger.ts`) and before audit `meta` is written.
 - **Logs:** app code logs through `logInfo` / `logError` (`src/logging/logger.ts`), never
   `console.*` directly. They run `redact()` and then `maskSensitiveFields()` on `meta`, keep only
   `name`, `message` and `stack` of an `Error`, and print one JSON line to the terminal. In
