@@ -178,4 +178,33 @@ describe('UsersRepository', () => {
       expect(createQueryBuilder).not.toHaveBeenCalled();
     });
   });
+  describe('existsWithRole', () => {
+    const USER_ID = '00000000-0000-4000-8000-000000000004';
+
+    function setupExists(result: boolean): {
+      usersRepository: UsersRepository;
+      exists: jest.Mock;
+    } {
+      const exists = jest.fn().mockResolvedValue(result);
+      const repository = { exists } as unknown as Repository<User>;
+      return { usersRepository: new UsersRepository(repository), exists };
+    }
+
+    it('returns false for a non-UUID id without querying', async () => {
+      const { usersRepository, exists } = setupExists(true);
+
+      await expect(usersRepository.existsWithRole('not-a-uuid', UserRole.SALES)).resolves.toBe(
+        false,
+      );
+      expect(exists).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])('checks id and role with exists and returns %s', async (result) => {
+      const { usersRepository, exists } = setupExists(result);
+
+      await expect(usersRepository.existsWithRole(USER_ID, UserRole.SALES)).resolves.toBe(result);
+      expect(exists).toHaveBeenCalledTimes(1);
+      expect(exists).toHaveBeenCalledWith({ where: { id: USER_ID, role: UserRole.SALES } });
+    });
+  });
 });

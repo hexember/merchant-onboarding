@@ -53,6 +53,35 @@ describe('Database schema (e2e)', () => {
     expect(rows.map((row) => row.label)).toEqual(['ADMIN', 'REVIEWER', 'SALES']);
   });
 
+  it('defines application_status with the six workflow states in order', async () => {
+    const rows: Array<{ label: string }> = await dataSource.query(
+      `SELECT unnest(enum_range(NULL::application_status))::text AS label`,
+    );
+
+    expect(rows.map((row) => row.label)).toEqual([
+      'DRAFT',
+      'RISK_REVIEW',
+      'UNDER_REVIEW',
+      'INFO_REQUESTED',
+      'APPROVED',
+      'REJECTED',
+    ]);
+  });
+
+  it('defines business_type with the five business types', async () => {
+    const rows: Array<{ label: string }> = await dataSource.query(
+      `SELECT unnest(enum_range(NULL::business_type))::text AS label`,
+    );
+
+    expect(rows.map((row) => row.label)).toEqual([
+      'SOLE_PROPRIETORSHIP',
+      'PARTNERSHIP',
+      'PRIVATE_LIMITED',
+      'PUBLIC_LIMITED',
+      'NON_PROFIT',
+    ]);
+  });
+
   it('stores emails lowercased through the repository', async () => {
     await usersRepository.insertIfAbsent({
       email: 'Mixed@Example.com',
