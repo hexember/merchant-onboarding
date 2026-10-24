@@ -32,8 +32,10 @@ import {
   ApplicationListResponseDto,
   ApplicationResponseDto,
 } from './dto/application-response.dto';
+import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 
 // Roles per route follow the docs/adrs/auth.md matrix. Scoping (404 for out-of-scope ids) is done
@@ -114,5 +116,47 @@ export class ApplicationsController {
   })
   submit(@Param('id') id: string, @CurrentUser() actor: AuthUser): Promise<ApplicationResponseDto> {
     return this.applicationsService.submit(id, actor);
+  }
+
+  @Post(':id/assign')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Assign or reassign the reviewer (ADMIN)' })
+  @ApiOkResponse({ type: ApplicationResponseDto })
+  @ApiBadRequestResponse({ description: 'Validation failed, or reviewerId is not a REVIEWER user' })
+  @ApiForbiddenResponse({ description: 'Wrong role' })
+  @ApiNotFoundResponse({ description: 'Unknown id' })
+  @ApiConflictResponse({
+    description:
+      'Not assignable in its status (INVALID_STATE_TRANSITION) or changed concurrently (CONCURRENT_MODIFICATION)',
+  })
+  assign(
+    @Param('id') id: string,
+    @Body() dto: AssignReviewerDto,
+    @CurrentUser() actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    return this.applicationsService.assignReviewer(id, dto, actor);
+  }
+
+  @Post(':id/transfer-owner')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({ summary: 'Transfer the application to another SALES owner (ADMIN)' })
+  @ApiOkResponse({ type: ApplicationResponseDto })
+  @ApiBadRequestResponse({
+    description: 'Validation failed, or salesOwnerId is not a SALES user',
+  })
+  @ApiForbiddenResponse({ description: 'Wrong role' })
+  @ApiNotFoundResponse({ description: 'Unknown id' })
+  @ApiConflictResponse({
+    description:
+      'Not transferable in its status (INVALID_STATE_TRANSITION) or changed concurrently (CONCURRENT_MODIFICATION)',
+  })
+  transferOwner(
+    @Param('id') id: string,
+    @Body() dto: TransferOwnerDto,
+    @CurrentUser() actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    return this.applicationsService.transferOwner(id, dto, actor);
   }
 }

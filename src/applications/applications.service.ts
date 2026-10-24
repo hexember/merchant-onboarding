@@ -18,6 +18,7 @@ import {
   isOperationAllowed,
   isRoleAllowed,
   nextStatus,
+  OPERATIONS,
   TransitionAction,
 } from './application-state-machine';
 import {
@@ -32,8 +33,10 @@ import {
   toApplicationDetailResponse,
   toApplicationResponse,
 } from './dto/application-response.dto';
+import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UPDATABLE_FIELDS, UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
 
@@ -48,6 +51,11 @@ export const NOT_EDITABLE_MESSAGE = 'Application can only be edited in DRAFT or 
 export const CONCURRENT_MODIFICATION_MESSAGE = 'Application was changed by another request';
 export const NOT_SUBMITTABLE_MESSAGE =
   'Application can only be submitted from DRAFT or INFO_REQUESTED';
+export const REVIEWER_NOT_REVIEWER_MESSAGE = 'reviewerId must be a REVIEWER user';
+export const NOT_ASSIGNABLE_MESSAGE =
+  'A reviewer can only be assigned in RISK_REVIEW, UNDER_REVIEW or INFO_REQUESTED';
+export const NOT_TRANSFERABLE_MESSAGE =
+  'Ownership can only be transferred while the application is not APPROVED or REJECTED';
 
 export const INVALID_STATE_TRANSITION_CODE = 'INVALID_STATE_TRANSITION';
 export const CONCURRENT_MODIFICATION_CODE = 'CONCURRENT_MODIFICATION';
@@ -69,9 +77,10 @@ interface SubmitResult {
 }
 
 /**
- * Create, list, read, edit and submit applications (docs/adrs/auth.md matrix,
- * docs/adrs/workflow.md §1.2). Which statuses allow an edit and which transitions exist come from
- * the state machine module (`application-state-machine.ts`). Every read goes through the scoped
+ * Create, list, read, edit and submit applications, plus the ADMIN-only `assignReviewer` and
+ * `transferOwner` (docs/adrs/auth.md matrix, docs/adrs/workflow.md §1.2). Which statuses allow an
+ * edit, an assign or a transfer, and which transitions exist, come from the state machine module
+ * (`application-state-machine.ts`). Every read goes through the scoped
  * `ApplicationsRepository`; each write and its audit row share one transaction. Responses are
  * masked by `toApplicationResponse` (`toApplicationDetailResponse` for `get`). After a submit
  * commits, the KYB check job is enqueued through `KybCheckQueue` (docs/adrs/kyb-check.md).
@@ -260,6 +269,117 @@ export class ApplicationsService {
     // is down (the application then stays in RISK_REVIEW; docs/adrs/kyb-check.md trade-off).
     await this.kybCheckQueue.enqueue(result.applicationId, result.submissionNo);
     return result.response;
+  }
+
+  /**
+   * ASSIGN (docs/adrs/workflow.md §1.2): ADMIN assigns or reassigns the reviewer in RISK_REVIEW,
+   * UNDER_REVIEW or INFO_REQUESTED. Order: role (403) → target is a REVIEWER (400, before the
+   * transaction) → scoped read (404) → status (409 INVALID_STATE_TRANSITION) → guarded write (409
+   * CONCURRENT_MODIFICATION). The REVIEWER_ASSIGNED audit row (ids only) shares the transaction.
+   * Assigning the current reviewer again takes the same path (write, version bump, audit row).
+   */
+  async assignReviewer(
+    id: string,
+    dto: AssignReviewerDto,
+    actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    // Defence in depth behind @Roles: SALES and REVIEWER → 403 before any DB work.
+    if (!OPERATIONS[ApplicationOperation.ASSIGN].roles.includes(actor.role)) {
+      throw new ForbiddenException();
+    }
+    // A malformed id, an unknown id and a non-REVIEWER user all get the same message.
+    if (!(await this.usersRepository.existsWithRole(dto.reviewerId, UserRole.REVIEWER))) {
+      throw new BadRequestException(REVIEWER_NOT_REVIEWER_MESSAGE);
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const app = await this.applicationsRepository.findAccessible(id, actor, manager);
+      if (app === null) {
+        throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
+      }
+      if (!isOperationAllowed(ApplicationOperation.ASSIGN, app.status)) {
+        throw this.conflict(NOT_ASSIGNABLE_MESSAGE, INVALID_STATE_TRANSITION_CODE);
+      }
+      const assigned = await this.applicationsRepository.assignReviewerIfAllowed(
+        app.id,
+        app.version,
+        dto.reviewerId,
+        actor,
+        manager,
+      );
+      if (!assigned) {
+        throw this.conflict(CONCURRENT_MODIFICATION_MESSAGE, CONCURRENT_MODIFICATION_CODE);
+      }
+      // User ids only; `from` is null when no reviewer was assigned.
+      await this.auditLogService.record(
+        {
+          actorType: AuditActorType.USER,
+          actorId: actor.id,
+          actorRole: actor.role,
+          action: AuditAction.REVIEWER_ASSIGNED,
+          entityType: AUDIT_ENTITY_TYPE,
+          entityId: app.id,
+          meta: { from: app.assignedReviewerId, to: dto.reviewerId },
+        },
+        manager,
+      );
+      return toApplicationResponse(await this.reReadInTransaction(app.id, actor, manager));
+    });
+  }
+
+  /**
+   * TRANSFER_OWNER (docs/adrs/workflow.md §1.2): ADMIN moves `salesOwnerId` to another SALES user
+   * in any non-terminal status. The same order and transaction as `assignReviewer`, with an
+   * OWNERSHIP_TRANSFERRED audit row (ids only). `createdById` never changes. Transferring to the
+   * current owner takes the same path (write, version bump, audit row).
+   */
+  async transferOwner(
+    id: string,
+    dto: TransferOwnerDto,
+    actor: AuthUser,
+  ): Promise<ApplicationResponseDto> {
+    // Defence in depth behind @Roles: SALES and REVIEWER → 403 before any DB work.
+    if (!OPERATIONS[ApplicationOperation.TRANSFER_OWNER].roles.includes(actor.role)) {
+      throw new ForbiddenException();
+    }
+    // A malformed id, an unknown id and a non-SALES user all get the same message.
+    if (!(await this.usersRepository.existsWithRole(dto.salesOwnerId, UserRole.SALES))) {
+      throw new BadRequestException(SALES_OWNER_NOT_SALES_MESSAGE);
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const app = await this.applicationsRepository.findAccessible(id, actor, manager);
+      if (app === null) {
+        throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
+      }
+      if (!isOperationAllowed(ApplicationOperation.TRANSFER_OWNER, app.status)) {
+        throw this.conflict(NOT_TRANSFERABLE_MESSAGE, INVALID_STATE_TRANSITION_CODE);
+      }
+      const transferred = await this.applicationsRepository.transferOwnerIfAllowed(
+        app.id,
+        app.version,
+        dto.salesOwnerId,
+        actor,
+        manager,
+      );
+      if (!transferred) {
+        throw this.conflict(CONCURRENT_MODIFICATION_MESSAGE, CONCURRENT_MODIFICATION_CODE);
+      }
+      // User ids only.
+      await this.auditLogService.record(
+        {
+          actorType: AuditActorType.USER,
+          actorId: actor.id,
+          actorRole: actor.role,
+          action: AuditAction.OWNERSHIP_TRANSFERRED,
+          entityType: AUDIT_ENTITY_TYPE,
+          entityId: app.id,
+          meta: { from: app.salesOwnerId, to: dto.salesOwnerId },
+        },
+        manager,
+      );
+      return toApplicationResponse(await this.reReadInTransaction(app.id, actor, manager));
+    });
   }
 
   /**

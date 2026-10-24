@@ -8,6 +8,11 @@ import * as request from 'supertest';
 import { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import {
+  CONCURRENT_MODIFICATION_CODE,
+  CONCURRENT_MODIFICATION_MESSAGE,
+} from '../src/applications/applications.service';
+import { ApplicationsRepository } from '../src/applications/applications.repository';
 import { AuditAction } from '../src/audit/audit.enums';
 import { AuditLogService } from '../src/audit/audit-log.service';
 import { UserRole } from '../src/common/common.enums';
@@ -26,8 +31,11 @@ import { resetApplicationData, resetTables } from './utils/test-db';
 // Redis, with the deterministic FakeKybProvider. The worker is off (test-env.ts) except inside
 // describe('through Redis'), which starts it explicitly.
 
-// Fake user only (@example.com, made-up name). The password comes from SEED_SALES_PASSWORD.
+// Fake users only (@example.com, made-up names). Passwords come from the SEED_* env variables.
 const SALES_EMAIL = 'kyb-sales@example.com';
+const SALES_B_EMAIL = 'kyb-sales-b@example.com';
+const ADMIN_EMAIL = 'kyb-admin@example.com';
+const REVIEWER_EMAIL = 'kyb-reviewer@example.com';
 
 // Fake application data. The sensitive values are asserted never to reach the logs raw.
 const RAW_TAX_ID = 'PAN-FAKE-00004321';
@@ -67,6 +75,8 @@ interface ApplicationRow {
   kyb_last_attempt_at: Date | null;
   submission_count: number;
   version: number;
+  assigned_reviewer_id: string | null;
+  sales_owner_id: string;
 }
 
 interface KybCheckRow {
@@ -105,6 +115,11 @@ describe('KYB worker (e2e)', () => {
   let queue: Queue;
   let processor: KybCheckProcessor;
   let salesToken: string;
+  let salesBToken: string;
+  let adminToken: string;
+  let reviewerToken: string;
+  let reviewerId: string;
+  let salesBId: string;
   let stdout: jest.SpyInstance;
   let stderr: jest.SpyInstance;
   // The logger prints through console.log / console.error, which Jest buffers per file, so the
@@ -133,21 +148,32 @@ describe('KYB worker (e2e)', () => {
     queue = app.get<Queue>(getQueueToken(KYB_CHECK_QUEUE));
     await queue.waitUntilReady();
 
+    // A missing variable fails here and names it. Each password is hashed once.
     const config = app.get(ConfigService);
     const salesPassword = config.getOrThrow<string>('SEED_SALES_PASSWORD');
+    const adminPassword = config.getOrThrow<string>('SEED_ADMIN_PASSWORD');
+    const reviewerPassword = config.getOrThrow<string>('SEED_REVIEWER_PASSWORD');
     const passwordHash = await bcrypt.hash(salesPassword, BCRYPT_COST);
+    const adminHash = await bcrypt.hash(adminPassword, BCRYPT_COST);
+    const reviewerHash = await bcrypt.hash(reviewerPassword, BCRYPT_COST);
     await resetTables(dataSource);
-    await app.get(UsersRepository).insertIfAbsent({
-      email: SALES_EMAIL,
-      fullName: 'Kim Sales',
-      role: UserRole.SALES,
-      passwordHash,
-    });
-    const login = await request(app.getHttpServer())
-      .post('/auth/login')
-      .send({ email: SALES_EMAIL, password: salesPassword })
-      .expect(200);
-    salesToken = (login.body as { accessToken: string }).accessToken;
+    const users = app.get(UsersRepository);
+    const fixtures: Array<[string, string, UserRole, string]> = [
+      [SALES_EMAIL, 'Kim Sales', UserRole.SALES, passwordHash],
+      [SALES_B_EMAIL, 'Kai Sales', UserRole.SALES, passwordHash],
+      [ADMIN_EMAIL, 'Ari Admin', UserRole.ADMIN, adminHash],
+      [REVIEWER_EMAIL, 'Rae Reviewer', UserRole.REVIEWER, reviewerHash],
+    ];
+    for (const [email, fullName, role, hash] of fixtures) {
+      await users.insertIfAbsent({ email, fullName, role, passwordHash: hash });
+    }
+    reviewerId = await userId(REVIEWER_EMAIL);
+    salesBId = await userId(SALES_B_EMAIL);
+
+    salesToken = await loginToken(SALES_EMAIL, salesPassword);
+    salesBToken = await loginToken(SALES_B_EMAIL, salesPassword);
+    adminToken = await loginToken(ADMIN_EMAIL, adminPassword);
+    reviewerToken = await loginToken(REVIEWER_EMAIL, reviewerPassword);
   });
 
   afterAll(async () => {
@@ -174,6 +200,26 @@ describe('KYB worker (e2e)', () => {
     allCaptured.push(capturedText());
   });
 
+  async function userId(email: string): Promise<string> {
+    const rows: Array<{ id: string }> = await dataSource.query(
+      'SELECT id FROM users WHERE email = $1',
+      [email],
+    );
+    const id = rows[0]?.id;
+    if (id === undefined) {
+      throw new Error('test user was not inserted');
+    }
+    return id;
+  }
+
+  async function loginToken(email: string, password: string): Promise<string> {
+    const res = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email, password })
+      .expect(200);
+    return (res.body as { accessToken: string }).accessToken;
+  }
+
   function chunks(spy: jest.SpyInstance): string[] {
     return spy.mock.calls.map((call: unknown[]) => String(call[0]));
   }
@@ -189,7 +235,7 @@ describe('KYB worker (e2e)', () => {
   }
 
   function expectNoRawSecrets(text: string): void {
-    for (const secret of [...RAW_SECRETS, salesToken]) {
+    for (const secret of [...RAW_SECRETS, salesToken, salesBToken, adminToken, reviewerToken]) {
       expect(text).not.toContain(secret);
     }
   }
@@ -228,7 +274,7 @@ describe('KYB worker (e2e)', () => {
   async function applicationRow(id: string): Promise<ApplicationRow | undefined> {
     const rows: ApplicationRow[] = await dataSource.query(
       `SELECT status, kyb_status, kyb_level, kyb_score, kyb_attempts, kyb_last_attempt_at,
-              submission_count, version
+              submission_count, version, assigned_reviewer_id, sales_owner_id
          FROM merchant_applications WHERE id = $1`,
       [id],
     );
@@ -376,9 +422,10 @@ describe('KYB worker (e2e)', () => {
 
     it('stale after a resubmit: no attempt, no row, no audit', async () => {
       const id = await submittedApplication();
-      await dataSource.query('UPDATE merchant_applications SET submission_count = 2 WHERE id = $1', [
-        id,
-      ]);
+      await dataSource.query(
+        'UPDATE merchant_applications SET submission_count = 2 WHERE id = $1',
+        [id],
+      );
 
       await expect(handle(id, 0, 1)).resolves.toBe('stale');
 
@@ -532,6 +579,131 @@ describe('KYB worker (e2e)', () => {
     });
   });
 
+  // ADMIN assign / transfer while the KYB check is pending (docs/adrs/workflow.md §1.2). The worker
+  // guards on submission_count and status, not version, and never sets the reviewer or owner.
+  describe('assign and transfer during RISK_REVIEW (crafted jobs)', () => {
+    function postAs(token: string, path: string, body: object): request.Test {
+      return request(app.getHttpServer())
+        .post(path)
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+    }
+
+    it('assign, then the worker completes: the reviewer is kept and sees the KYB result', async () => {
+      const id = await submittedApplication();
+      await postAs(adminToken, `/applications/${id}/assign`, { reviewerId }).expect(200);
+      const afterAssign = await applicationRow(id);
+      expect(afterAssign).toMatchObject({
+        status: 'RISK_REVIEW',
+        assigned_reviewer_id: reviewerId,
+      });
+
+      await expect(handle(id)).resolves.toBe('completed');
+
+      const row = await applicationRow(id);
+      expect(row).toMatchObject({
+        status: 'UNDER_REVIEW',
+        kyb_status: 'COMPLETED',
+        assigned_reviewer_id: reviewerId,
+      });
+      expect(row?.version).toBeGreaterThan(afterAssign?.version ?? Number.MAX_SAFE_INTEGER);
+      await expect(auditActions(id)).resolves.toEqual([
+        'APPLICATION_CREATED',
+        'APPLICATION_SUBMITTED',
+        'REVIEWER_ASSIGNED',
+        'KYB_CHECK_COMPLETED',
+      ]);
+      const res = await request(app.getHttpServer())
+        .get(`/applications/${id}`)
+        .set('Authorization', `Bearer ${reviewerToken}`)
+        .expect(200);
+      expect((res.body as { kybCheck: KybCheckBody }).kybCheck.status).toBe('COMPLETED');
+    });
+
+    it('transfer, then the worker completes: the new owner is kept; the original owner gets 404', async () => {
+      const id = await submittedApplication();
+      await postAs(adminToken, `/applications/${id}/transfer-owner`, {
+        salesOwnerId: salesBId,
+      }).expect(200);
+
+      await expect(handle(id)).resolves.toBe('completed');
+
+      await expect(applicationRow(id)).resolves.toMatchObject({
+        status: 'UNDER_REVIEW',
+        kyb_status: 'COMPLETED',
+        sales_owner_id: salesBId,
+      });
+      expect((await auditActions(id)).slice(-2)).toEqual([
+        'OWNERSHIP_TRANSFERRED',
+        'KYB_CHECK_COMPLETED',
+      ]);
+      const owner = await request(app.getHttpServer())
+        .get(`/applications/${id}`)
+        .set('Authorization', `Bearer ${salesBToken}`)
+        .expect(200);
+      expect((owner.body as { kybCheck: KybCheckBody }).kybCheck.status).toBe('COMPLETED');
+      // kybCheckBody() expects 200 for salesToken, so the original owner is checked directly.
+      await request(app.getHttpServer())
+        .get(`/applications/${id}`)
+        .set('Authorization', `Bearer ${salesToken}`)
+        .expect(404);
+      const list = await request(app.getHttpServer())
+        .get('/applications')
+        .set('Authorization', `Bearer ${salesToken}`)
+        .expect(200);
+      expect(
+        (list.body as { items: Array<{ id: string }> }).items.map((item) => item.id),
+      ).not.toContain(id);
+    });
+
+    it('the worker completes between the ADMIN read and write: assign gets 409, the KYB result stands', async () => {
+      const id = await submittedApplication();
+      // Installed only after the submit (which also calls findAccessible). Reference to the real
+      // method, taken before spying, so the mock does not call itself. Only the first call (the
+      // assign's scoped read) runs the worker; later calls go to the real method.
+      const repo = app.get(ApplicationsRepository);
+      const real = repo.findAccessible.bind(repo);
+      const outcomes: KybJobOutcome[] = [];
+      const spy = jest
+        .spyOn(repo, 'findAccessible')
+        .mockImplementationOnce(async (appId, actor, manager) => {
+          const found = await real(appId, actor, manager);
+          // The worker runs on its own connections; the SELECT above holds no row lock.
+          outcomes.push(await handle(id));
+          return found;
+        });
+      let res: request.Response;
+      try {
+        res = await postAs(adminToken, `/applications/${id}/assign`, { reviewerId });
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(outcomes).toEqual(['completed']);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        statusCode: 409,
+        error: 'Conflict',
+        message: CONCURRENT_MODIFICATION_MESSAGE,
+        code: CONCURRENT_MODIFICATION_CODE,
+      });
+      await expect(applicationRow(id)).resolves.toMatchObject({
+        status: 'UNDER_REVIEW',
+        kyb_status: 'COMPLETED',
+        assigned_reviewer_id: null,
+      });
+      await expect(kybCheckRows(id)).resolves.toHaveLength(1);
+      expect(await auditActions(id)).not.toContain('REVIEWER_ASSIGNED');
+
+      // A retry now succeeds in UNDER_REVIEW.
+      await postAs(adminToken, `/applications/${id}/assign`, { reviewerId }).expect(200);
+      await expect(applicationRow(id)).resolves.toMatchObject({
+        status: 'UNDER_REVIEW',
+        assigned_reviewer_id: reviewerId,
+      });
+    });
+  });
+
   describe('through Redis', () => {
     let queueEvents: QueueEvents;
 
@@ -580,91 +752,79 @@ describe('KYB worker (e2e)', () => {
       await queueEvents.close();
     });
 
-    it(
-      'success: the job completes; a second enqueue of the same submission is a no-op',
-      async () => {
-        const id = await submittedApplication();
-        const job = await requireJob(id);
+    it('success: the job completes; a second enqueue of the same submission is a no-op', async () => {
+      const id = await submittedApplication();
+      const job = await requireJob(id);
 
-        await expect(job.waitUntilFinished(queueEvents, 15000)).resolves.toBe('completed');
+      await expect(job.waitUntilFinished(queueEvents, 15000)).resolves.toBe('completed');
 
-        await expect(applicationRow(id)).resolves.toMatchObject({ status: 'UNDER_REVIEW' });
-        await expect(kybCheckBody(id)).resolves.toMatchObject({
-          status: 'COMPLETED',
-          attempts: 1,
-        });
+      await expect(applicationRow(id)).resolves.toMatchObject({ status: 'UNDER_REVIEW' });
+      await expect(kybCheckBody(id)).resolves.toMatchObject({
+        status: 'COMPLETED',
+        attempts: 1,
+      });
 
-        const countsBefore = await queue.getJobCounts();
-        await expect(app.get(KybCheckQueue).enqueue(id, 1)).resolves.toBe(true);
-        await expect(queue.getJobCounts()).resolves.toEqual(countsBefore);
-        await expect(kybCheckRows(id)).resolves.toHaveLength(1);
-      },
-      30000,
-    );
+      const countsBefore = await queue.getJobCounts();
+      await expect(app.get(KybCheckQueue).enqueue(id, 1)).resolves.toBe(true);
+      await expect(queue.getJobCounts()).resolves.toEqual(countsBefore);
+      await expect(kybCheckRows(id)).resolves.toHaveLength(1);
+    }, 30000);
 
-    it(
-      'retry, then success: the failed attempt is delayed by the backoff, the promoted retry completes',
-      async () => {
-        fake.failNext(1);
-        const id = await submittedApplication();
-        const job = await requireJob(id);
+    it('retry, then success: the failed attempt is delayed by the backoff, the promoted retry completes', async () => {
+      fake.failNext(1);
+      const id = await submittedApplication();
+      const job = await requireJob(id);
 
+      await waitForState(job, 'delayed', 5000);
+      await job.promote();
+      await expect(job.waitUntilFinished(queueEvents, 15000)).resolves.toBe('completed');
+
+      await expect(applicationRow(id)).resolves.toMatchObject({
+        status: 'UNDER_REVIEW',
+        kyb_status: 'COMPLETED',
+        kyb_attempts: 2,
+      });
+      const kybAudits = (await auditRows(id)).filter((audit) => audit.action.startsWith('KYB_'));
+      expect(kybAudits.map((audit) => [audit.action, audit.meta.attempt])).toEqual([
+        ['KYB_CHECK_ATTEMPT_FAILED', 1],
+        ['KYB_CHECK_COMPLETED', 2],
+      ]);
+      expect(kybAudits[0]?.meta.final).toBe(false);
+    }, 30000);
+
+    it('retries used up: BullMQ fails the job after the fifth attempt; UNDER_REVIEW / FAILED', async () => {
+      fake.alwaysFail();
+      const id = await submittedApplication();
+      const job = await requireJob(id);
+
+      for (let retry = 0; retry < 4; retry += 1) {
         await waitForState(job, 'delayed', 5000);
         await job.promote();
-        await expect(job.waitUntilFinished(queueEvents, 15000)).resolves.toBe('completed');
+      }
+      await expect(job.waitUntilFinished(queueEvents, 10000)).rejects.toThrow();
+      await expect(job.getState()).resolves.toBe('failed');
 
-        await expect(applicationRow(id)).resolves.toMatchObject({
-          status: 'UNDER_REVIEW',
-          kyb_status: 'COMPLETED',
-          kyb_attempts: 2,
-        });
-        const kybAudits = (await auditRows(id)).filter((audit) => audit.action.startsWith('KYB_'));
-        expect(kybAudits.map((audit) => [audit.action, audit.meta.attempt])).toEqual([
-          ['KYB_CHECK_ATTEMPT_FAILED', 1],
-          ['KYB_CHECK_COMPLETED', 2],
-        ]);
-        expect(kybAudits[0]?.meta.final).toBe(false);
-      },
-      30000,
-    );
-
-    it(
-      'retries used up: BullMQ fails the job after the fifth attempt; UNDER_REVIEW / FAILED',
-      async () => {
-        fake.alwaysFail();
-        const id = await submittedApplication();
-        const job = await requireJob(id);
-
-        for (let retry = 0; retry < 4; retry += 1) {
-          await waitForState(job, 'delayed', 5000);
-          await job.promote();
-        }
-        await expect(job.waitUntilFinished(queueEvents, 10000)).rejects.toThrow();
-        await expect(job.getState()).resolves.toBe('failed');
-
-        await expect(applicationRow(id)).resolves.toMatchObject({
-          status: 'UNDER_REVIEW',
-          kyb_status: 'FAILED',
-          kyb_level: null,
-          kyb_score: null,
-          kyb_attempts: 5,
-        });
-        await expect(kybCheckRows(id)).resolves.toEqual([]);
-        const kybAudits = (await auditRows(id)).filter((audit) => audit.action.startsWith('KYB_'));
-        expect(kybAudits.map((audit) => [audit.action, audit.meta.attempt, audit.meta.final])).toEqual(
-          [
-            ['KYB_CHECK_ATTEMPT_FAILED', 1, false],
-            ['KYB_CHECK_ATTEMPT_FAILED', 2, false],
-            ['KYB_CHECK_ATTEMPT_FAILED', 3, false],
-            ['KYB_CHECK_ATTEMPT_FAILED', 4, false],
-            ['KYB_CHECK_ATTEMPT_FAILED', 5, true],
-            ['KYB_CHECK_FAILED', undefined, undefined],
-          ],
-        );
-        await expect(kybCheckBody(id)).resolves.toMatchObject({ status: 'FAILED', label: null });
-      },
-      60000,
-    );
+      await expect(applicationRow(id)).resolves.toMatchObject({
+        status: 'UNDER_REVIEW',
+        kyb_status: 'FAILED',
+        kyb_level: null,
+        kyb_score: null,
+        kyb_attempts: 5,
+      });
+      await expect(kybCheckRows(id)).resolves.toEqual([]);
+      const kybAudits = (await auditRows(id)).filter((audit) => audit.action.startsWith('KYB_'));
+      expect(
+        kybAudits.map((audit) => [audit.action, audit.meta.attempt, audit.meta.final]),
+      ).toEqual([
+        ['KYB_CHECK_ATTEMPT_FAILED', 1, false],
+        ['KYB_CHECK_ATTEMPT_FAILED', 2, false],
+        ['KYB_CHECK_ATTEMPT_FAILED', 3, false],
+        ['KYB_CHECK_ATTEMPT_FAILED', 4, false],
+        ['KYB_CHECK_ATTEMPT_FAILED', 5, true],
+        ['KYB_CHECK_FAILED', undefined, undefined],
+      ]);
+      await expect(kybCheckBody(id)).resolves.toMatchObject({ status: 'FAILED', label: null });
+    }, 60000);
   });
 
   it('never logs a raw sensitive value or a token, across the whole spec', () => {
