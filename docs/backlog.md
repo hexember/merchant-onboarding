@@ -44,7 +44,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   for the assigned REVIEWER only, guards from §1.2 (APPROVE needs `kybStatus=COMPLETED`), 409 for
   invalid states and concurrent decisions, `DECISION_RECORDED` audit row, request info → resubmit
   → new KYB check end to end.
-- [ ] **audit-log-endpoint** — ADMIN-only `GET /applications/:id/audit-logs` with pagination,
+- [x] **audit-log-endpoint** — branch `ai/audit-log-endpoint-20261024-1901`, PR https://github.com/hexember/merchant-onboarding/pull/13 — ADMIN-only `GET /applications/:id/audit-logs` with pagination,
   returning `meta` (masked) per docs/adrs/database.md; REVIEWER and SALES → 403.
 - [ ] **authz-gap-fill** — Run the `authz-audit` skill and add any missing enforcement or tests it
   reports, so every row of the authorization matrix and every denied case in docs/adrs/testing.md
@@ -54,6 +54,12 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- Defaults taken in audit-log-endpoint (#13): history oldest first; items omit entityType/entityId;
+  actor ids returned to ADMIN; masking now matches key names by substring (so e.g. a boolean
+  `emailVerified` in meta is masked); bare `auth`/`otp`/`pin` keys deliberately not redacted.
+- Follow-up (small): audit rows written in one transaction share `created_at` (KYB final failure
+  writes two); a migration switching the default to `clock_timestamp()` would make their order causal.
 
 - Defaults taken in reviewer-decision (#12): note optional for all decisions, trimmed, max 2000,
   no NUL, rejected if it contains the application's own raw tax/national ID; note returned
