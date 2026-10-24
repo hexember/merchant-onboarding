@@ -8,7 +8,9 @@ import { ApplicationStatus, KybStatus } from './application.enums';
 import {
   allowedStatuses,
   ApplicationOperation,
+  DecisionAction,
   fromStatuses,
+  requiresCompletedKyb,
   TransitionAction,
 } from './application-state-machine';
 import { UpdateApplicationDto } from './dto/update-application.dto';
@@ -60,12 +62,13 @@ export interface ApplicationPage {
  * all rows, and any other role nothing. Out of scope and unknown ids both come back as `null`, so
  * the caller answers 404 for both. There is deliberately no unscoped find-by-id.
  *
- * There are four conditional updates: `updateIfEditable` (PATCH), `submitIfAllowed` (SUBMIT),
- * `assignReviewerIfAllowed` (ASSIGN) and `transferOwnerIfAllowed` (TRANSFER_OWNER). Each must only
- * be called with an id that `findAccessible` returned in the same transaction; its `version`
- * condition then guarantees the row is still the one that passed the scope check. All four bump
- * `version`, and as defence in depth all four repeat the actor's scope, built by the same
- * `applyScope` as the reads, so the read and write rules cannot drift apart.
+ * There are five conditional updates: `updateIfEditable` (PATCH), `submitIfAllowed` (SUBMIT),
+ * `assignReviewerIfAllowed` (ASSIGN), `transferOwnerIfAllowed` (TRANSFER_OWNER) and
+ * `decideIfAllowed` (APPROVE / REJECT / REQUEST_INFO). Each must only be called with an id that
+ * `findAccessible` returned in the same transaction; its `version` condition then guarantees the
+ * row is still the one that passed the scope check. All five bump `version`, and as defence in
+ * depth all five repeat the actor's scope, built by the same `applyScope` as the reads, so the
+ * read and write rules cannot drift apart.
  *
  * Every write to an ownership or assignment column (`sales_owner_id`, `assigned_reviewer_id`)
  * must bump `version`, so a concurrent update's `version` condition sees the change. Those writes
@@ -246,6 +249,48 @@ export class ApplicationsRepository {
       .andWhere('status IN (:...transferableStatuses)', {
         transferableStatuses: [...allowedStatuses(ApplicationOperation.TRANSFER_OWNER)],
       });
+    // The UPDATE has no alias, so the scope uses bare column names.
+    const result = await this.applyScope(query, actor, '').execute();
+    return result.affected === 1;
+  }
+
+  /**
+   * The single decision write (docs/adrs/workflow.md §1.2): moves the row to `to`, overwrites
+   * `decision_note` (`null` when no note is given), stamps `decided_at` and bumps `version`.
+   * Applies only if the row still has `expectedVersion` and a status `action` may start from
+   * (UNDER_REVIEW), and repeats the actor's scope. For APPROVE it also requires
+   * `kyb_status = COMPLETED`, bound as a parameter, so a KYB change after the read cannot slip
+   * through. Returns false when no row matched (changed concurrently). It touches no other column
+   * (not the ownership or assignment columns, the KYB columns or `submission_count`). Only call it
+   * with an id `findAccessible` returned in the same transaction.
+   */
+  async decideIfAllowed(
+    id: string,
+    expectedVersion: number,
+    action: DecisionAction,
+    to: ApplicationStatus,
+    note: string | null,
+    actor: AuthUser,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const query = manager
+      .createQueryBuilder()
+      .update(MerchantApplication)
+      .set({
+        status: to,
+        decisionNote: note,
+        decidedAt: () => 'now()',
+        version: () => 'version + 1',
+        updatedAt: () => 'now()',
+      })
+      .where('id = :id', { id })
+      .andWhere('version = :expectedVersion', { expectedVersion })
+      .andWhere('status IN (:...decidableStatuses)', {
+        decidableStatuses: [...fromStatuses(action)],
+      });
+    if (requiresCompletedKyb(action)) {
+      query.andWhere('kyb_status = :kybCompleted', { kybCompleted: KybStatus.COMPLETED });
+    }
     // The UPDATE has no alias, so the scope uses bare column names.
     const result = await this.applyScope(query, actor, '').execute();
     return result.affected === 1;

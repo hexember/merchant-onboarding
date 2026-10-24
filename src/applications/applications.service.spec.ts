@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import { DataSource, EntityManager } from 'typeorm';
 import { AuditAction, AuditActorType } from '../audit/audit.enums';
 import { AuditEntry, AuditLogService } from '../audit/audit-log.service';
@@ -17,17 +18,23 @@ import {
   APPLICATION_NOT_FOUND_MESSAGE,
   ApplicationsService,
   CONCURRENT_MODIFICATION_CODE,
+  CONCURRENT_MODIFICATION_MESSAGE,
   INVALID_STATE_TRANSITION_CODE,
+  KYB_NOT_COMPLETED_CODE,
+  KYB_NOT_COMPLETED_MESSAGE,
   NO_FIELDS_TO_UPDATE_MESSAGE,
   NOT_ASSIGNABLE_MESSAGE,
+  NOT_DECIDABLE_MESSAGE,
   NOT_SUBMITTABLE_MESSAGE,
   NOT_TRANSFERABLE_MESSAGE,
+  NOTE_CONTAINS_RAW_ID_MESSAGE,
   REVIEWER_NOT_REVIEWER_MESSAGE,
   SALES_OWNER_NOT_SALES_MESSAGE,
   SALES_OWNER_REQUIRED_MESSAGE,
 } from './applications.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { DecisionType, RecordDecisionDto } from './dto/record-decision.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
 
@@ -112,6 +119,7 @@ interface Mocks {
   submitIfAllowed: jest.Mock;
   assignReviewerIfAllowed: jest.Mock;
   transferOwnerIfAllowed: jest.Mock;
+  decideIfAllowed: jest.Mock;
   existsWithRole: jest.Mock;
   record: jest.Mock;
   enqueue: jest.Mock;
@@ -127,6 +135,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
   const submitIfAllowed = jest.fn().mockResolvedValue(true);
   const assignReviewerIfAllowed = jest.fn().mockResolvedValue(true);
   const transferOwnerIfAllowed = jest.fn().mockResolvedValue(true);
+  const decideIfAllowed = jest.fn().mockResolvedValue(true);
   const existsWithRole = jest.fn().mockResolvedValue(true);
   const record = jest.fn().mockResolvedValue(undefined);
   const enqueue = jest.fn().mockResolvedValue(true);
@@ -140,6 +149,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
       submitIfAllowed,
       assignReviewerIfAllowed,
       transferOwnerIfAllowed,
+      decideIfAllowed,
     } as unknown as ApplicationsRepository,
     { existsWithRole } as unknown as UsersRepository,
     { record } as unknown as AuditLogService,
@@ -156,6 +166,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     submitIfAllowed,
     assignReviewerIfAllowed,
     transferOwnerIfAllowed,
+    decideIfAllowed,
     existsWithRole,
     record,
     enqueue,
@@ -172,6 +183,26 @@ function onlyAuditEntry(record: jest.Mock): AuditEntry {
   expect(record).toHaveBeenCalledTimes(1);
   const [entry] = record.mock.calls[0] as [AuditEntry];
   return entry;
+}
+
+// A fake reviewer note; checked to never reach the audit entry.
+const NOTE_MARKER = 'fake-decision-note-marker-7f3a';
+
+/** An UNDER_REVIEW application assigned to REVIEWER with a completed KYB check. */
+function decidable(overrides: Partial<MerchantApplication> = {}): MerchantApplication {
+  return fakeApplication({
+    status: ApplicationStatus.UNDER_REVIEW,
+    kybStatus: KybStatus.COMPLETED,
+    assignedReviewerId: REVIEWER_ID,
+    submissionCount: 1,
+    decisionNote: null,
+    decidedAt: null,
+    ...overrides,
+  });
+}
+
+function decisionDto(decision: DecisionType, note?: string): RecordDecisionDto {
+  return note === undefined ? { decision } : { decision, note };
 }
 
 describe('ApplicationsService', () => {
@@ -1079,5 +1110,258 @@ describe('ApplicationsService', () => {
       expect(transferOwnerIfAllowed).toHaveBeenCalledTimes(1);
       expect(onlyAuditEntry(record).meta).toEqual({ from: SALES_ID, to: SALES_ID });
     });
+  });
+
+  describe('decide (denied)', () => {
+    it.each([
+      ['ADMIN', ADMIN],
+      ['SALES', SALES],
+    ])('%s → 403 before any DB work', async (_label, actor) => {
+      const { service, transaction, findAccessible, decideIfAllowed, record } = setup(decidable());
+
+      await expect(
+        service.decide(APP_ID, decisionDto(DecisionType.APPROVE), actor),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(findAccessible).not.toHaveBeenCalled();
+      expect(decideIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('not assigned to the caller or unknown (findAccessible → null) → 404, no write', async () => {
+      const { service, decideIfAllowed, record } = setup(null);
+
+      const error = await service
+        .decide(APP_ID, decisionDto(DecisionType.REJECT), REVIEWER)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toBe(APPLICATION_NOT_FOUND_MESSAGE);
+      expect(decideIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    const notDecidable = [
+      ApplicationStatus.DRAFT,
+      ApplicationStatus.RISK_REVIEW,
+      ApplicationStatus.INFO_REQUESTED,
+      ApplicationStatus.APPROVED,
+      ApplicationStatus.REJECTED,
+    ];
+    const decisions = [DecisionType.APPROVE, DecisionType.REJECT, DecisionType.REQUEST_INFO];
+    it.each(notDecidable.flatMap((status) => decisions.map((d) => [status, d] as const)))(
+      '%s + %s → 409 INVALID_STATE_TRANSITION with no write or audit',
+      async (status, decision) => {
+        const { service, decideIfAllowed, record } = setup(decidable({ status }));
+
+        const error = await service
+          .decide(APP_ID, decisionDto(decision), REVIEWER)
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          statusCode: 409,
+          error: 'Conflict',
+          message: NOT_DECIDABLE_MESSAGE,
+          code: INVALID_STATE_TRANSITION_CODE,
+        });
+        expect(decideIfAllowed).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([KybStatus.PENDING, KybStatus.FAILED, KybStatus.NOT_STARTED])(
+      'APPROVE with kybStatus %s → 409 KYB_NOT_COMPLETED with no write or audit',
+      async (kybStatus) => {
+        const { service, decideIfAllowed, record } = setup(decidable({ kybStatus }));
+
+        const error = await service
+          .decide(APP_ID, decisionDto(DecisionType.APPROVE), REVIEWER)
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(ConflictException);
+        expect((error as ConflictException).getResponse()).toEqual({
+          statusCode: 409,
+          error: 'Conflict',
+          message: KYB_NOT_COMPLETED_MESSAGE,
+          code: KYB_NOT_COMPLETED_CODE,
+        });
+        expect(decideIfAllowed).not.toHaveBeenCalled();
+        expect(record).not.toHaveBeenCalled();
+      },
+    );
+
+    it('APPROVE on a DRAFT with kybStatus NOT_STARTED → INVALID_STATE_TRANSITION, not KYB_NOT_COMPLETED', async () => {
+      const { service, decideIfAllowed } = setup(
+        decidable({ status: ApplicationStatus.DRAFT, kybStatus: KybStatus.NOT_STARTED }),
+      );
+
+      const error = await service
+        .decide(APP_ID, decisionDto(DecisionType.APPROVE), REVIEWER)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        code: INVALID_STATE_TRANSITION_CODE,
+      });
+      expect(decideIfAllowed).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['the raw taxId', `Checked ${RAW_TAX_ID} today`],
+      ['the raw ownerNationalId', `Owner id ${RAW_NATIONAL_ID}`],
+      ['the taxId in another case without dashes', 'see panfake00001234'],
+      ['the ownerNationalId with spaces instead of dashes', 'nid fake 5678 confirmed'],
+    ])('note containing %s → 400, no write or audit', async (_label, note) => {
+      const { service, decideIfAllowed, record } = setup(decidable());
+
+      const error = await service
+        .decide(APP_ID, decisionDto(DecisionType.REQUEST_INFO, note), REVIEWER)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as BadRequestException).message).toBe(NOTE_CONTAINS_RAW_ID_MESSAGE);
+      expect(JSON.stringify((error as BadRequestException).getResponse())).not.toContain(note);
+      expect(decideIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('lost race (decideIfAllowed → false) → 409 CONCURRENT_MODIFICATION, no audit', async () => {
+      const { service, findAccessible, decideIfAllowed, record } = setup(decidable());
+      decideIfAllowed.mockResolvedValue(false);
+
+      const error = await service
+        .decide(APP_ID, decisionDto(DecisionType.APPROVE), REVIEWER)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual({
+        statusCode: 409,
+        error: 'Conflict',
+        message: CONCURRENT_MODIFICATION_MESSAGE,
+        code: CONCURRENT_MODIFICATION_CODE,
+      });
+      expect(record).not.toHaveBeenCalled();
+      expect(findAccessible).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects when the audit write fails', async () => {
+      const { service, record } = setup(decidable());
+      record.mockRejectedValue(new Error('audit write failed'));
+
+      await expect(
+        service.decide(APP_ID, decisionDto(DecisionType.REJECT), REVIEWER),
+      ).rejects.toThrow('audit write failed');
+    });
+  });
+
+  describe('decide (allowed)', () => {
+    it.each([
+      [DecisionType.APPROVE, ApplicationStatus.APPROVED],
+      [DecisionType.REJECT, ApplicationStatus.REJECTED],
+      [DecisionType.REQUEST_INFO, ApplicationStatus.INFO_REQUESTED],
+    ])(
+      '%s → guarded write, DECISION_RECORDED audit without the note, masked response',
+      async (decision, to) => {
+        const { service, findAccessible, decideIfAllowed, record, enqueue, manager } = setup();
+        findAccessible.mockResolvedValueOnce(decidable({ version: 3 })).mockResolvedValueOnce(
+          decidable({
+            status: to,
+            version: 4,
+            decisionNote: NOTE_MARKER,
+            decidedAt: new Date('2026-02-01T00:00:00Z'),
+          }),
+        );
+
+        const response = await service.decide(APP_ID, decisionDto(decision, NOTE_MARKER), REVIEWER);
+
+        expect(findAccessible).toHaveBeenNthCalledWith(1, APP_ID, REVIEWER, manager);
+        expect(decideIfAllowed).toHaveBeenCalledWith(
+          APP_ID,
+          3,
+          decision,
+          to,
+          NOTE_MARKER,
+          REVIEWER,
+          manager,
+        );
+        const entry = onlyAuditEntry(record);
+        expect(entry).toEqual({
+          actorType: AuditActorType.USER,
+          actorId: REVIEWER_ID,
+          actorRole: UserRole.REVIEWER,
+          action: AuditAction.DECISION_RECORDED,
+          entityType: 'merchant_application',
+          entityId: APP_ID,
+          meta: { decision, from: ApplicationStatus.UNDER_REVIEW, to },
+        });
+        expect(Object.keys(entry.meta ?? {}).sort()).toEqual(['decision', 'from', 'to']);
+        expect(JSON.stringify(entry)).not.toContain(NOTE_MARKER);
+        expect((record.mock.calls[0] as unknown[])[1]).toBe(manager);
+        expect(findAccessible).toHaveBeenCalledTimes(2);
+        expect(findAccessible).toHaveBeenNthCalledWith(2, APP_ID, REVIEWER, manager);
+        expect(response.status).toBe(to);
+        expect(response.decisionNote).toBe(NOTE_MARKER);
+        expect(response.taxId).toBe('••••••1234');
+        expect(JSON.stringify(response)).not.toContain(RAW_TAX_ID);
+        expect(JSON.stringify(response)).not.toContain(RAW_NATIONAL_ID);
+        expect(response).not.toHaveProperty('version');
+        expect(response).not.toHaveProperty('meta');
+        expect(response).not.toHaveProperty('kybCheck');
+        expect(enqueue).not.toHaveBeenCalled();
+      },
+    );
+
+    it('no note → decideIfAllowed receives null', async () => {
+      const { service, decideIfAllowed, enqueue } = setup(decidable());
+
+      await service.decide(APP_ID, decisionDto(DecisionType.APPROVE), REVIEWER);
+
+      expect((decideIfAllowed.mock.calls[0] as unknown[])[4]).toBeNull();
+      expect(enqueue).not.toHaveBeenCalled();
+    });
+
+    it('a note with only the last 4 of the IDs is allowed and stored', async () => {
+      const { service, decideIfAllowed, record } = setup(decidable());
+      const note = 'Tax ID ending 1234 and national ID ending 5678 verified';
+
+      await service.decide(APP_ID, decisionDto(DecisionType.APPROVE, note), REVIEWER);
+
+      expect((decideIfAllowed.mock.calls[0] as unknown[])[4]).toBe(note);
+      expect(record).toHaveBeenCalledTimes(1);
+    });
+
+    it('decideIfAllowed receives the trimmed note from a transformed DTO', async () => {
+      const { service, decideIfAllowed, record } = setup(decidable());
+      const dto = plainToInstance(RecordDecisionDto, {
+        decision: DecisionType.REQUEST_INFO,
+        note: '  more docs  ',
+      });
+
+      await service.decide(APP_ID, dto, REVIEWER);
+
+      expect((decideIfAllowed.mock.calls[0] as unknown[])[4]).toBe('more docs');
+      expect(JSON.stringify(onlyAuditEntry(record))).not.toContain('more docs');
+    });
+
+    it('a whitespace-only note → decideIfAllowed receives null', async () => {
+      const { service, decideIfAllowed } = setup(decidable());
+      const dto = plainToInstance(RecordDecisionDto, {
+        decision: DecisionType.REJECT,
+        note: '   ',
+      });
+
+      await service.decide(APP_ID, dto, REVIEWER);
+
+      expect((decideIfAllowed.mock.calls[0] as unknown[])[4]).toBeNull();
+    });
+
+    it.each([DecisionType.REJECT, DecisionType.REQUEST_INFO])(
+      '%s with kybStatus FAILED → succeeds',
+      async (decision) => {
+        const { service, decideIfAllowed, record } = setup(
+          decidable({ kybStatus: KybStatus.FAILED }),
+        );
+
+        await service.decide(APP_ID, decisionDto(decision), REVIEWER);
+
+        expect(decideIfAllowed).toHaveBeenCalledTimes(1);
+        expect(onlyAuditEntry(record).action).toBe(AuditAction.DECISION_RECORDED);
+      },
+    );
   });
 });

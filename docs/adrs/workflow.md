@@ -88,8 +88,30 @@ application. `KYB_COMPLETE` has no HTTP endpoint at all; only the worker can tri
 
 **The worker moves the application to `UNDER_REVIEW` whether the check succeeds or
 fails permanently.** After the retries are used up, it moves to `UNDER_REVIEW` with
-`kybStatus = FAILED`. This means an application never gets stuck in `RISK_REVIEW`. APPROVE
-can still be possible even if `kybStatus != COMPLETED`, so nothing is blocked in real world. Noextra "retry KYB check" endpoint is needed.
+`kybStatus = FAILED`. This means an application never gets stuck in `RISK_REVIEW`.
+APPROVE requires `kybStatus = COMPLETED`; approving with any other `kybStatus` (e.g.
+`FAILED`) returns **409** with code `KYB_NOT_COMPLETED`. This is the one exception to
+"anything not in the table returns `INVALID_STATE_TRANSITION`": the row is in the table, but
+its guard failed. The reviewer can still REJECT or REQUEST_INFO; after a request info, the
+resubmit starts a new KYB check. So nothing is blocked, and no extra "retry KYB check" endpoint
+is needed.
+
+**Decision details** (`POST /applications/:id/decision`):
+- `note` is optional for all three decisions, trimmed, and at most 2000 characters
+  (whitespace-only means no note).
+- Every decision overwrites `decision_note` (with `null` when no note is given) and sets
+  `decided_at`.
+- REQUEST_INFO keeps `assigned_reviewer_id`, so the same reviewer gets the application back
+  after the resubmit's KYB check.
+- Resubmit leaves `decision_note` / `decided_at` alone until the next decision, so SALES can
+  still read the request.
+- The note is returned in responses but never written to audit meta or logs.
+- `decision_note` is free text that the SALES owner, the assigned REVIEWER and ADMIN can all
+  see. It is returned unmasked: it is not in [sensitive-data.md](sensitive-data.md)'s masked
+  list. The API therefore rejects (400, without echoing the note) a note that contains the
+  application's own raw `taxId` or `ownerNationalId` (compared case-insensitively, ignoring
+  spaces and dashes); the last 4 digits alone are allowed. A note with a NUL character is also
+  rejected with 400.
 
 **Decisions are allowed only in `UNDER_REVIEW`.** The rule "no human decision before the KYB result" is therefore enforced by the state machine itself, not by an extra `if` that could be forgotten.
 

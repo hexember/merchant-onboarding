@@ -12,6 +12,10 @@
   (last 4), `ownerEmail` → `j•••@example.com`, `ownerPhone` → last 3 digits.
   _(decision)_ After a write, the API never returns these values in full, not even to the owner.
   A real reviewer UI would need a separate audited "reveal" endpoint (not built).
+- **Decision note:** `decision_note` is reviewer-written free text, returned unmasked to
+  everyone who can view the application, and never written to audit `meta` or logs. A note that
+  contains the application's own raw tax or national ID is rejected with 400. See
+  [workflow.md §1.2](workflow.md#12-transition-table).
 - **Would need field-level encryption** (documented, not implemented): `tax_id`,
   `owner_national_id`, `owner_phone`, `owner_email`. Candidate approach: envelope encryption
   with a KMS-held key. For lookup by tax ID, store a separate HMAC "blind index" column. Postgres
