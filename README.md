@@ -24,10 +24,7 @@ JWT (passport-jwt) · class-validator · Swagger/OpenAPI · Jest + Supertest · 
 
 ## Getting started
 
-Requires Node.js 20+ and Docker.
-
-> `npm run migration:run` and `npm run seed` are placeholders that only print a message until the
-> database and auth tasks add migrations and seed data.
+Requires Node.js 20+ and Docker (Postgres 16; the schema needs Postgres 13+).
 
 ```bash
 cp .env.example .env          # then fill in local values
@@ -38,12 +35,35 @@ npm run seed                  # fake users for each role
 npm run start:dev             # API on :3000
 ```
 
+`npm run seed` inserts one fake user per role (`admin@example.com`, `reviewer@example.com`,
+`sales@example.com`). Their passwords come from `SEED_ADMIN_PASSWORD`, `SEED_REVIEWER_PASSWORD`
+and `SEED_SALES_PASSWORD` in `.env`. It is idempotent: an existing user is skipped and keeps its
+password.
+
+### Migrations
+
+The schema changes only through migrations in `src/database/migrations/` (`synchronize` is off).
+
+```bash
+npm run migration:run         # apply pending migrations
+npm run migration:revert      # undo the last migration
+npm run migration:generate -- src/database/migrations/<Name>   # diff entities against the DB
+```
+
+Each script builds first and uses the compiled `dist/database/data-source.js`. Add every new
+migration class to `src/database/migrations/index.ts`, otherwise it never runs.
+
 ## Testing
 
 ```bash
 npm run test                  # unit tests
-npm run test:e2e              # integration tests (needs docker services)
+npm run typecheck             # type-checks src/ and test/
+npm run test:e2e              # integration tests against real Postgres (needs docker services)
 ```
+
+`npm run test:e2e` uses a separate database named by `DB_NAME_TEST`. It **drops and recreates**
+that database on every run, then applies all migrations. The name must end in `_test` and differ
+from `DB_NAME`. The seed tests also need the `SEED_*` variables.
 
 ## AI-assisted workflow
 

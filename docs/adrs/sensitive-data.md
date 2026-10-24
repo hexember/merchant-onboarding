@@ -1,7 +1,8 @@
 # Sensitive data
 
 - **Never logged:** `password`, `passwordHash`, `accessToken`, the `Authorization` header and the JWT secret.
-  A shared `redact()` helper (key-based denylist) is applied in the request-logging interceptor,
+  A shared `redact()` helper (key-based denylist; a key is redacted when its lowercased name
+  contains `password`, `secret`, `token`, `authorization`, `cookie`, `apikey` or `hash`) is applied in the request-logging interceptor,
   in the exception filter and before audit `meta` is written.
 - **Masked in API responses and audit `meta`:** `taxId` and `ownerNationalId` → `••••••1234`
   (last 4), `ownerEmail` → `j•••@example.com`, `ownerPhone` → last 3 digits.
