@@ -1,7 +1,7 @@
 ---
 name: ship
 description: Autonomous pipeline for one task - plan, write the plan, review it against the ADRs, implement it, verify, then push a branch and open a draft PR. Use when the user runs /ship <task>.
-argument-hint: <task description>
+argument-hint: [--stack <base-branch>] <task description>
 disable-model-invocation: true
 ---
 
@@ -22,12 +22,15 @@ findings).
 ## 0. Prepare
 
 1. `git status --porcelain`: if the tree is dirty, stop and ask the user (don't stash or discard).
-2. Pick a short kebab-case `<slug>` from the task (max ~5 words).
-3. **Always create a new branch for this run**, whatever branch you are on now (`main`, or an
+2. **Base branch.** If the arguments start with `--stack <base-branch>`, remove that from the task
+   text and use `<base>` = `<base-branch>` (a stacked PR). Otherwise `<base>` = `main`.
+   `git ls-remote --exit-code --heads origin <base>` must succeed, or stop and report.
+3. Pick a short kebab-case `<slug>` from the task (max ~5 words).
+4. **Always create a new branch for this run**, whatever branch you are on now (`main`, or an
    `ai/*` branch from an earlier run). Never reuse or continue an existing branch.
    - Branch name: `<branch>` = `ai/<slug>-<stamp>`, where `<stamp>` is `date +%Y%m%d-%H%M`.
-   - `git fetch origin main`
-   - `git switch -c <branch> origin/main`
+   - `git fetch origin <base>`
+   - `git switch -c <branch> origin/<base>`
    - If that name already exists locally or on `origin` (`git ls-remote --heads origin <branch>`),
      append `-2`, `-3`, … until it is unused.
    - Check `git branch --show-current` prints `<branch>`. If it doesn't, stop and report.
@@ -68,7 +71,15 @@ This is the first time all packages are checked together.
 1. If any implementer said the change touches auth, guards, application queries, logging, audit
    or seed/test data, launch the `security-reviewer` agent **in the same message** as you start
    step 2, so the review runs while the gate runs.
-2. Run the `verify` skill yourself.
+2. Run the `verify` skill yourself. If the shell can't read `.env` (sandbox) or the dev
+   containers aren't running, run the same steps in **one** Bash call against a throwaway
+   compose project instead, and say so in the Tests table. Export random inline values, never
+   values from `.env`: `export PATH="$HOME/.docker/bin:$PATH"; export NODE_ENV=test PORT=3999
+   DB_HOST=localhost DB_PORT=55432 DB_USER=agent DB_PASSWORD=$(openssl rand -hex 16)
+   DB_NAME=mo_agent DB_NAME_TEST=mo_agent_test REDIS_HOST=localhost REDIS_PORT=56379` plus any
+   other required variable (generate secrets with `openssl rand -hex 16`); then
+   `docker compose -p mo-agent up -d --wait`, the verify steps, and always
+   `docker compose -p mo-agent down -v` at the end. Never touch the default compose project.
 3. If `verify` fails or the security review has findings, launch one `implementer` with
    "whole plan" plus all the failures and findings verbatim, then re-run `verify`.
    One fix round only. Still failing, or unresolved high-severity findings → stop and report.
@@ -80,10 +91,11 @@ This is the first time all packages are checked together.
 2. Commit with a conventional message: `<type>(<area>): <summary>`, a body listing the main
    changes, and `Plan: docs/plans/<slug>.md`.
 3. `git push -u origin <branch>`
-4. `gh pr create --draft --base main --head <branch> --title "<commit subject>" --body-file <tmp>`
+4. `gh pr create --draft --base <base> --head <branch> --title "<commit subject>" --body-file <tmp>`
    where the body has: **Summary** (the plan's Goal), **Plan** (link to `docs/plans/<slug>.md`),
    **ADR references**, **Tests** (the verify table), **Security review** (findings or "not
-   needed"), and **Reviewer notes** (any plan-review suggestions not applied).
+   needed"), and **Reviewer notes** (any plan-review suggestions not applied). For a stacked PR,
+   start the body with `Stacked on <base> — review and merge that PR first.`
 
 ## 6. Report
 
