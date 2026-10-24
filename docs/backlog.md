@@ -36,7 +36,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   `jobId = kyb-check:{id}:{n}`, the idempotent worker from docs/adrs/kyb-check.md (stale check,
   unique row, conditional update, retries, final failure → `UNDER_REVIEW` + `FAILED`), and the
   `kybCheck` block with the derived `label` on `GET /applications/:id`.
-- [ ] **assign-transfer** — ADMIN `POST /applications/:id/assign` (target must be a REVIEWER,
+- [x] **assign-transfer** — branch `ai/assign-transfer-20261024-1811`, PR https://github.com/hexember/merchant-onboarding/pull/11 — ADMIN `POST /applications/:id/assign` (target must be a REVIEWER,
   allowed statuses per §1.2) and `POST /applications/:id/transfer-owner` (target must be SALES,
   non-terminal statuses), with audit rows and the bypass tests (SALES cannot assign or transfer,
   ADMIN cannot transfer to a non-SALES user, A loses access after transfer to B).
@@ -54,6 +54,11 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- Defaults taken in assign-transfer (#11): assigning the same reviewer / transferring to the
+  current owner → 200 with a version bump and an audit row `from === to`; target check (400)
+  before the application lookup (404), ADMIN-only so nothing leaks; one 400 message for wrong
+  role, unknown and malformed target ids; responses use the base masked shape (no `kybCheck`).
 
 - `.env` / `.env.example` (kyb-worker, #10): `REDIS_HOST` is now required (app, `migration:*`,
   `seed`, `test:e2e`) — add `REDIS_HOST=localhost` and `REDIS_PORT=6379` to `.env` if missing, and
