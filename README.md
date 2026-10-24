@@ -91,6 +91,9 @@ npm run test:e2e              # integration tests against real Postgres (needs d
 that database on every run, then applies all migrations. The name must end in `_test` and differ
 from `DB_NAME`. The seed tests also need the `SEED_*` variables.
 
+To try the API by hand, see [docs/manual-testing.md](docs/manual-testing.md): a Postman
+collection that logs in every role and walks through the whole flow, plus the common surprises.
+
 ## AI-assisted workflow
 
 Run `/ship <task>` in Claude Code to take one task from plan to draft PR:
