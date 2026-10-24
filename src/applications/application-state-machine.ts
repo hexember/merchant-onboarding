@@ -33,13 +33,6 @@ export type SystemTransitionAction = TransitionAction.KYB_COMPLETE;
 /** Actions a user may trigger. `KYB_COMPLETE` is excluded at compile time. */
 export type UserTransitionAction = Exclude<TransitionAction, SystemTransitionAction>;
 
-export const USER_TRANSITION_ACTIONS: readonly UserTransitionAction[] = [
-  TransitionAction.SUBMIT,
-  TransitionAction.APPROVE,
-  TransitionAction.REJECT,
-  TransitionAction.REQUEST_INFO,
-];
-
 /** The reviewer decisions (`POST /applications/:id/decision`). No SUBMIT, no KYB_COMPLETE. */
 export type DecisionAction =
   TransitionAction.APPROVE | TransitionAction.REJECT | TransitionAction.REQUEST_INFO;
@@ -124,12 +117,6 @@ export const TRANSITIONS: readonly Transition[] = [
   },
 ];
 
-/** Statuses with no outgoing transition (docs/adrs/workflow.md §1.1). */
-export const TERMINAL_STATUSES: readonly ApplicationStatus[] = [
-  ApplicationStatus.APPROVED,
-  ApplicationStatus.REJECTED,
-];
-
 /** The row matching all three, or `null`. */
 function findTransition(
   from: ApplicationStatus,
@@ -152,11 +139,6 @@ export function nextStatus(
 ): ApplicationStatus | null {
   const row = findTransition(from, action, TransitionActorType.USER);
   return row === null ? null : row.to;
-}
-
-/** True when the user action is allowed from `from`. */
-export function canTransition(from: ApplicationStatus, action: UserTransitionAction): boolean {
-  return nextStatus(from, action) !== null;
 }
 
 /**

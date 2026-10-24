@@ -3,7 +3,9 @@ import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
 import { ApplicationStatus } from '../application.enums';
 
+/** Number of items returned when the client sends no `limit` (20). */
 export const DEFAULT_PAGE_SIZE = 20;
+/** Largest `limit` a client may ask for; a bigger value gets a 400. */
 export const MAX_PAGE_SIZE = 100;
 /** Caps the OFFSET scan and keeps `(page - 1) * limit` a plain integer Postgres accepts. */
 export const MAX_PAGE = 10000;
