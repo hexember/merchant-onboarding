@@ -15,7 +15,7 @@ A backend API for **merchant onboarding and risk review** at a payments company:
    to edit, and resubmitting starts a new risk check.
 5. Every significant action is written to an audit log, with sensitive fields masked.
 
-The project is backend only; Swagger serves as the UI.
+The project is backend only; Swagger UI at `/docs` serves as the UI (OpenAPI JSON at `/docs-json`).
 
 ## Tech stack
 
@@ -32,8 +32,11 @@ docker compose up -d          # postgres + redis
 npm install
 npm run migration:run
 npm run seed                  # fake users for each role
-npm run start:dev             # API on :3000
+npm run start:dev             # API on :3000, Swagger UI at /docs
 ```
+
+`/docs` is on by default and off when `NODE_ENV=production`; `SWAGGER_ENABLED=true|false`
+overrides that.
 
 `npm run seed` inserts one fake user per role (`admin@example.com`, `reviewer@example.com`,
 `sales@example.com`). Their passwords come from `SEED_ADMIN_PASSWORD`, `SEED_REVIEWER_PASSWORD`

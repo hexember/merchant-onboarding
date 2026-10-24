@@ -9,6 +9,7 @@ export interface AppEnv {
   DB_USER: string;
   DB_PASSWORD: string;
   DB_NAME: string;
+  SWAGGER_ENABLED: boolean;
 }
 
 const DEFAULT_NODE_ENV = 'development';
@@ -49,6 +50,34 @@ function readPort(
   return port;
 }
 
+// Accepts only 'true' or 'false' (trimmed, any case) so the value has one clear spelling;
+// '1', '0', 'yes' and 'no' are rejected on purpose.
+function readBoolean(
+  raw: Record<string, unknown>,
+  name: string,
+  defaultValue: boolean,
+  invalid: string[],
+): boolean {
+  const value = raw[name];
+  if (value === undefined || value === '') {
+    return defaultValue;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase();
+    if (text === 'true') {
+      return true;
+    }
+    if (text === 'false') {
+      return false;
+    }
+  }
+  invalid.push(name);
+  return defaultValue;
+}
+
 export function validateEnv(raw: Record<string, unknown>): Record<string, unknown> & AppEnv {
   const invalid: string[] = [];
 
@@ -64,6 +93,8 @@ export function validateEnv(raw: Record<string, unknown>): Record<string, unknow
     DB_USER: readRequiredString(raw, 'DB_USER', invalid),
     DB_PASSWORD: readRequiredString(raw, 'DB_PASSWORD', invalid),
     DB_NAME: readRequiredString(raw, 'DB_NAME', invalid),
+    // Swagger UI (/docs) stays off in production unless someone sets SWAGGER_ENABLED=true on purpose.
+    SWAGGER_ENABLED: readBoolean(raw, 'SWAGGER_ENABLED', nodeEnv !== 'production', invalid),
   };
 
   if (invalid.length > 0) {
