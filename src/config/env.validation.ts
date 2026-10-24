@@ -10,6 +10,7 @@ export interface AppEnv {
   DB_PASSWORD: string;
   DB_NAME: string;
   SWAGGER_ENABLED: boolean;
+  JWT_SECRET: string;
 }
 
 const DEFAULT_NODE_ENV = 'development';
@@ -17,10 +18,41 @@ const DEFAULT_APP_PORT = 3000;
 const DEFAULT_DB_PORT = 5432;
 const MIN_PORT = 1;
 const MAX_PORT = 65535;
+// HS256 key floor: 32 characters (256 bits). A short placeholder such as `change-me` fails fast.
+export const JWT_SECRET_MIN_LENGTH = 32;
+// A long but trivial key (e.g. 32 times 'a', or 'abab...') is refused: it needs at least this
+// many distinct characters. Random hex or base64 output has far more.
+export const JWT_SECRET_MIN_DISTINCT_CHARS = 8;
+// The `.env.example` placeholder, refused in any case even when padded to the minimum length.
+const SECRET_PLACEHOLDER = 'change-me';
 
 function readRequiredString(raw: Record<string, unknown>, name: string, invalid: string[]): string {
   const value = raw[name];
   if (typeof value !== 'string' || value.trim() === '') {
+    invalid.push(name);
+    return '';
+  }
+  return value;
+}
+
+// Required secret: a string that is not blank, has at least `minLength` characters and
+// `JWT_SECRET_MIN_DISTINCT_CHARS` distinct characters, and does not contain the `change-me`
+// placeholder (any case). The value is returned as given (not trimmed), so the key is exactly
+// what was configured. Only the name is reported, never the value.
+function readSecret(
+  raw: Record<string, unknown>,
+  name: string,
+  minLength: number,
+  invalid: string[],
+): string {
+  const value = raw[name];
+  if (
+    typeof value !== 'string' ||
+    value.trim() === '' ||
+    value.length < minLength ||
+    new Set(value).size < JWT_SECRET_MIN_DISTINCT_CHARS ||
+    value.toLowerCase().includes(SECRET_PLACEHOLDER)
+  ) {
     invalid.push(name);
     return '';
   }
@@ -95,6 +127,7 @@ export function validateEnv(raw: Record<string, unknown>): Record<string, unknow
     DB_NAME: readRequiredString(raw, 'DB_NAME', invalid),
     // Swagger UI (/docs) stays off in production unless someone sets SWAGGER_ENABLED=true on purpose.
     SWAGGER_ENABLED: readBoolean(raw, 'SWAGGER_ENABLED', nodeEnv !== 'production', invalid),
+    JWT_SECRET: readSecret(raw, 'JWT_SECRET', JWT_SECRET_MIN_LENGTH, invalid),
   };
 
   if (invalid.length > 0) {

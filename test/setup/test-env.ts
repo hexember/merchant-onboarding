@@ -1,5 +1,6 @@
 // Points every e2e test at the separate test database (DB_NAME_TEST). This is test setup, so it
 // reads and writes process.env directly. Error messages name variables, never values.
+import { randomBytes } from 'node:crypto';
 import { config } from 'dotenv';
 
 // The harness drops and recreates this database, so the name must clearly be a test database.
@@ -48,9 +49,29 @@ export function resolveTestDatabaseEnv(env: Record<string, string | undefined>):
   return { DB_NAME: testName, DB_NAME_ORIGINAL: original };
 }
 
+/**
+ * Returns the JWT_SECRET to use for the e2e run: the configured value when it is non-empty,
+ * otherwise a fresh runtime value from `generate`. The generated secret is never written to disk
+ * or printed. It never decides an assertion: tests sign and verify through the same app's
+ * JwtService, so any valid key gives the same results.
+ */
+export function ensureTestJwtSecret(
+  env: Record<string, string | undefined>,
+  generate: () => string = () => randomBytes(32).toString('hex'),
+): string {
+  const existing = env.JWT_SECRET;
+  if (existing !== undefined && existing !== '') {
+    return existing;
+  }
+  return generate();
+}
+
 /** Loads .env (a missing file is fine; process env wins) and switches DB_NAME to the test DB. */
 export function applyTestDatabaseEnv(): void {
   config({ quiet: true });
+  // A secret from .env or the shell wins. The second call (setupFiles after globalSetup) sees the
+  // value already set and keeps it, so one process uses one secret.
+  process.env.JWT_SECRET = ensureTestJwtSecret(process.env);
   const resolved = resolveTestDatabaseEnv(process.env);
   process.env.DB_NAME = resolved.DB_NAME;
   process.env.DB_NAME_ORIGINAL = resolved.DB_NAME_ORIGINAL;

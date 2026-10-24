@@ -1,7 +1,14 @@
-import { validateEnv } from './env.validation';
+import {
+  JWT_SECRET_MIN_DISTINCT_CHARS,
+  JWT_SECRET_MIN_LENGTH,
+  validateEnv,
+} from './env.validation';
 
 // Neutral sentinel for every string variable. It is not a credential for any system.
 const FIXTURE = 'fixture';
+// Obviously fake signing key of exactly the minimum length ('fixture-xxx...'). Not a real secret.
+// It has exactly the minimum of 8 distinct characters (f, i, x, t, u, r, e, -).
+const JWT_SECRET_FIXTURE = 'fixture-'.padEnd(JWT_SECRET_MIN_LENGTH, 'x');
 
 function validRaw(): Record<string, unknown> {
   return {
@@ -12,6 +19,7 @@ function validRaw(): Record<string, unknown> {
     DB_USER: FIXTURE,
     DB_PASSWORD: FIXTURE,
     DB_NAME: FIXTURE,
+    JWT_SECRET: JWT_SECRET_FIXTURE,
   };
 }
 
@@ -154,6 +162,90 @@ describe('validateEnv', () => {
 
       expect(message).toContain('SWAGGER_ENABLED');
       expect(message).not.toContain('not-a-bool-value');
+    });
+  });
+
+  describe('JWT_SECRET', () => {
+    it('accepts exactly the minimum length and returns the value unchanged', () => {
+      expect(JWT_SECRET_FIXTURE).toHaveLength(32);
+      expect(validateEnv(validRaw()).JWT_SECRET).toBe(JWT_SECRET_FIXTURE);
+    });
+
+    it('denied: throws naming JWT_SECRET when it is missing', () => {
+      const raw = validRaw();
+      delete raw.JWT_SECRET;
+
+      expect(errorMessage(() => validateEnv(raw))).toContain('JWT_SECRET');
+    });
+
+    it('denied: throws naming JWT_SECRET for an empty string', () => {
+      expect(errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: '' }))).toContain(
+        'JWT_SECRET',
+      );
+    });
+
+    it('denied: throws naming JWT_SECRET for a whitespace-only value', () => {
+      const blank = ' '.repeat(JWT_SECRET_MIN_LENGTH);
+
+      expect(errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: blank }))).toContain(
+        'JWT_SECRET',
+      );
+    });
+
+    it('denied: throws naming JWT_SECRET when one character too short', () => {
+      const short = JWT_SECRET_FIXTURE.slice(0, JWT_SECRET_MIN_LENGTH - 1);
+
+      expect(errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: short }))).toContain(
+        'JWT_SECRET',
+      );
+    });
+
+    it('the fixture has exactly the minimum number of distinct characters', () => {
+      expect(new Set(JWT_SECRET_FIXTURE).size).toBe(JWT_SECRET_MIN_DISTINCT_CHARS);
+    });
+
+    // Deterministic stand-ins with the shape of `openssl rand -hex 32` / `-base64 48` output.
+    it.each([
+      ['hex', '0123456789abcdef'.repeat(4)],
+      ['base64', 'Zml4dHVyZS1vbmx5LW5vdC1hLXJlYWwta2V5LWp1c3QtYS10ZXN0LXZhbHVlMTIz'],
+    ])('accepts a %s-shaped secret', (_label, secret) => {
+      expect(validateEnv({ ...validRaw(), JWT_SECRET: secret }).JWT_SECRET).toBe(secret);
+    });
+
+    it.each([
+      ['one repeated character', 'a'.repeat(64)],
+      ['a short repeated pattern', 'abcd'.repeat(16)],
+      ['one distinct character too few', 'abcdefg'.repeat(6)],
+    ])('denied: throws naming JWT_SECRET for %s', (_label, secret) => {
+      const message = errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: secret }));
+
+      expect(message).toContain('JWT_SECRET');
+      expect(message).not.toContain(secret);
+    });
+
+    it.each([
+      ['padded after', 'change-me-'.padEnd(JWT_SECRET_MIN_LENGTH + 8, 'q1w2e3r4t5')],
+      ['in upper case', `prefix-${'CHANGE-ME'}-0123456789abcdefghij`],
+    ])('denied: throws naming JWT_SECRET for the change-me placeholder %s', (_label, secret) => {
+      expect(secret.length).toBeGreaterThanOrEqual(JWT_SECRET_MIN_LENGTH);
+      const message = errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: secret }));
+
+      expect(message).toContain('JWT_SECRET');
+      expect(message).not.toContain(secret);
+    });
+
+    it('denied: throws naming JWT_SECRET for a non-string value', () => {
+      expect(errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: 12345 }))).toContain(
+        'JWT_SECRET',
+      );
+    });
+
+    it('does not put the secret value in the error message', () => {
+      const sentinel = 'sentinel10';
+      const message = errorMessage(() => validateEnv({ ...validRaw(), JWT_SECRET: sentinel }));
+
+      expect(message).toContain('JWT_SECRET');
+      expect(message).not.toContain(sentinel);
     });
   });
 });

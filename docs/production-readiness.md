@@ -16,6 +16,10 @@ Each item links to the design doc that explains it. Tick an item only when it is
 
 - [ ] **Short-lived access tokens with refresh and revocation.** Add rotating refresh tokens and
   a token version on the user. See [auth.md](adrs/auth.md).
+- [ ] **Rate-limit `POST /auth/login`** (per IP and per email, e.g. with a Redis-backed limiter).
+  Each attempt runs a bcrypt compare at cost 12 (about 250 ms of CPU), so a flood of logins can
+  exhaust CPU, and each attempt writes an append-only `LOGIN_FAILED`/`LOGIN_SUCCEEDED` audit row,
+  so the audit table grows without bound. See [auth.md](adrs/auth.md).
 
 ## Sensitive data
 

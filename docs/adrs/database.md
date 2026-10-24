@@ -108,8 +108,8 @@ exactly one result.
 |-------------|---------------|-------|
 | id          | uuid PK       | |
 | actor_type  | enum          | USER / SYSTEM |
-| actor_id    | uuid null     | set when actor_type = USER; null for SYSTEM |
-| actor_role  | enum null     | the user's role at the time of the action |
+| actor_id    | uuid null     | set when actor_type = USER; null for SYSTEM, and null for LOGIN_FAILED (the caller is not authenticated; entity_id names the targeted user when the email matched one) |
+| actor_role  | enum null     | the user's role at the time of the action; null when actor_id is null |
 | actor_label | varchar null  | for SYSTEM, the component name, e.g. `kyb-worker` |
 | action      | enum          | APPLICATION_CREATED, APPLICATION_UPDATED, APPLICATION_SUBMITTED, REVIEWER_ASSIGNED, OWNERSHIP_TRANSFERRED, KYB_CHECK_ATTEMPT_FAILED, KYB_CHECK_COMPLETED, KYB_CHECK_FAILED, DECISION_RECORDED, LOGIN_SUCCEEDED, LOGIN_FAILED |
 | entity_type | varchar       | `merchant_application`, `user` |

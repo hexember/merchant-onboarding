@@ -7,12 +7,11 @@ fresh every iteration.
 
 Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped, see "Waiting on you".
 
-**Stack starts on:** `ai/ship-next-loop-20261024-1541` (the PR that adds this file, which sits on
-the logging-module PR).
+**Stack starts on:** `main` (the logging-module and workflow PRs are merged).
 
 ## Items
 
-- [ ] **auth-login** — Auth: `POST /auth/login` returning `{ accessToken, expiresIn }` per
+- [x] **auth-login** — branch `ai/auth-login-20261024-1551`, PR https://github.com/hexember/merchant-onboarding/pull/7 — Auth: `POST /auth/login` returning `{ accessToken, expiresIn }` per
   docs/adrs/auth.md (HS256 JWT with `JWT_SECRET` from env validation, 1h expiry, claims
   `{ sub, role }`, generic 401, bcrypt compare even for unknown emails, `LOGIN_SUCCEEDED` /
   `LOGIN_FAILED` audit rows with the email masked). Add class-validator with a global
@@ -56,4 +55,15 @@ the logging-module PR).
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
 
-- `.env.example`: add `# LOG_LEVEL=log` with its comment (from the logging-module PR).
+- **Decision (auth-login, #7):** `main` has no global exception filter any more, so error bodies
+  are Nest's defaults (no `code`, 5xx not made generic). That no longer matches
+  `.claude/rules/api.md` (`{ statusCode, error, message, code }`). Either update the rule, or add a
+  backlog item to restore a small error filter. The loop assumes Nest defaults until told otherwise.
+- `.env.example` (auth-login, #7): add `JWT_SECRET=change-me` with the comment from the PR, and put a
+  real value (32+ chars, 8+ distinct, e.g. `openssl rand -base64 48`) in `.env`. The app, seed,
+  migrations and `test:e2e` refuse to start without one.
+- `docs/adrs/sensitive-data.md` line 6 still mentions "the exception filter" (predates auth-login).
+- Defaults taken in auth-login (#7): login returns 200; passwords capped at 128 chars; a 400
+  validation error writes no audit row; the guard re-reads the user on each request.
+- `.env.example`: the `LOG_LEVEL` line from the logging-module PR is no longer needed (`LOG_LEVEL`
+  was removed on `main`).

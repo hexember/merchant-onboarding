@@ -20,7 +20,7 @@ The project is backend only; Swagger UI at `/docs` serves as the UI (OpenAPI JSO
 ## Tech stack
 
 TypeScript (strict) · Node.js · NestJS · PostgreSQL + TypeORM (migrations) · Redis + BullMQ ·
-JWT (passport-jwt) · class-validator · Swagger/OpenAPI · Jest + Supertest · Docker Compose
+JWT (@nestjs/jwt) · class-validator · Swagger/OpenAPI · Jest + Supertest · Docker Compose
 
 ## Getting started
 
@@ -42,6 +42,22 @@ overrides that.
 `sales@example.com`). Their passwords come from `SEED_ADMIN_PASSWORD`, `SEED_REVIEWER_PASSWORD`
 and `SEED_SALES_PASSWORD` in `.env`. It is idempotent: an existing user is skipped and keeps its
 password.
+
+`JWT_SECRET` (at least 32 characters, at least 8 distinct characters, not containing
+`change-me`) is required. Replace the `JWT_SECRET=change-me`
+placeholder from `.env.example`, for example with the output of `openssl rand -base64 48`: the
+app refuses to start with the placeholder, and so does `npm run test:e2e` (a secret that is set
+must still be valid). Only when `JWT_SECRET` is not set at all does the e2e run generate a random
+one at runtime.
+
+### Auth
+
+`POST /auth/login` with `{ "email", "password" }` returns `{ accessToken, expiresIn }`: an HS256
+JWT that expires after 1 hour (`expiresIn: 3600`). Every other route needs
+`Authorization: Bearer <accessToken>`; a missing, expired or tampered token gets 401. A wrong
+email or password gets the same `401 Invalid credentials`. Routes opt out of the token check with
+`@Public()` and limit roles with `@Roles(...)` (the wrong role gets 403). Request bodies are
+validated, and unknown fields are rejected with 400.
 
 ### Logging
 

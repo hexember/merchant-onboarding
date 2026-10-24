@@ -30,6 +30,24 @@ function createQueryBuilderMock(raw: unknown): {
   return qb;
 }
 
+function createSelectQueryBuilderMock(found: User | null): {
+  select: jest.Mock;
+  addSelect: jest.Mock;
+  where: jest.Mock;
+  getOne: jest.Mock;
+} {
+  const qb = {
+    select: jest.fn(),
+    addSelect: jest.fn(),
+    where: jest.fn(),
+    getOne: jest.fn().mockResolvedValue(found),
+  };
+  qb.select.mockReturnValue(qb);
+  qb.addSelect.mockReturnValue(qb);
+  qb.where.mockReturnValue(qb);
+  return qb;
+}
+
 function setup(raw: unknown = []): {
   usersRepository: UsersRepository;
   findOne: jest.Mock;
@@ -42,6 +60,17 @@ function setup(raw: unknown = []): {
     createQueryBuilder: jest.fn().mockReturnValue(qb),
   } as unknown as Repository<User>;
   return { usersRepository: new UsersRepository(repository), findOne, qb };
+}
+
+function setupSelect(found: User | null): {
+  usersRepository: UsersRepository;
+  createQueryBuilder: jest.Mock;
+  qb: ReturnType<typeof createSelectQueryBuilderMock>;
+} {
+  const qb = createSelectQueryBuilderMock(found);
+  const createQueryBuilder = jest.fn().mockReturnValue(qb);
+  const repository = { createQueryBuilder } as unknown as Repository<User>;
+  return { usersRepository: new UsersRepository(repository), createQueryBuilder, qb };
 }
 
 const newUser = {
@@ -86,5 +115,67 @@ describe('UsersRepository', () => {
     const { usersRepository } = setup([]);
 
     await expect(usersRepository.insertIfAbsent(newUser)).resolves.toBe(false);
+  });
+
+  it('findByEmailWithPasswordHash normalises the email and selects passwordHash', async () => {
+    const found = Object.assign(new User(), {
+      id: '00000000-0000-0000-0000-000000000002',
+      email: 'sales@example.com',
+      passwordHash: HASH_SENTINEL,
+    });
+    const { usersRepository, createQueryBuilder, qb } = setupSelect(found);
+
+    await expect(usersRepository.findByEmailWithPasswordHash(' Sales@Example.COM ')).resolves.toBe(
+      found,
+    );
+
+    expect(createQueryBuilder).toHaveBeenCalledWith('user');
+    expect(qb.addSelect).toHaveBeenCalledWith('user.passwordHash');
+    expect(qb.where).toHaveBeenCalledWith('user.email = :email', { email: 'sales@example.com' });
+  });
+
+  it('findByEmailWithPasswordHash returns null when no user matches', async () => {
+    const { usersRepository } = setupSelect(null);
+
+    await expect(
+      usersRepository.findByEmailWithPasswordHash('nobody@example.com'),
+    ).resolves.toBeNull();
+  });
+
+  describe('findAuthUserById', () => {
+    const USER_ID = '00000000-0000-4000-8000-000000000003';
+
+    it('selects only id and role by primary key and returns just those fields', async () => {
+      const found = Object.assign(new User(), {
+        id: USER_ID,
+        email: 'admin@example.com',
+        fullName: 'Alex Admin',
+        role: UserRole.ADMIN,
+      });
+      const { usersRepository, createQueryBuilder, qb } = setupSelect(found);
+
+      await expect(usersRepository.findAuthUserById(USER_ID)).resolves.toEqual({
+        id: USER_ID,
+        role: UserRole.ADMIN,
+      });
+
+      expect(createQueryBuilder).toHaveBeenCalledWith('user');
+      expect(qb.select).toHaveBeenCalledWith(['user.id', 'user.role']);
+      expect(qb.addSelect).not.toHaveBeenCalled();
+      expect(qb.where).toHaveBeenCalledWith('user.id = :id', { id: USER_ID });
+    });
+
+    it('returns null when no user matches', async () => {
+      const { usersRepository } = setupSelect(null);
+
+      await expect(usersRepository.findAuthUserById(USER_ID)).resolves.toBeNull();
+    });
+
+    it('returns null for a non-UUID id without querying', async () => {
+      const { usersRepository, createQueryBuilder } = setupSelect(null);
+
+      await expect(usersRepository.findAuthUserById('not-a-uuid')).resolves.toBeNull();
+      expect(createQueryBuilder).not.toHaveBeenCalled();
+    });
   });
 });

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { UserRole } from '../../common/common.enums';
+import { BCRYPT_COST } from '../../common/password';
 import { UsersRepository } from '../../users/users.repository';
 
 export interface SeedUser {
@@ -34,7 +35,7 @@ export const SEED_USERS: readonly SeedUser[] = [
   },
 ];
 
-export const BCRYPT_COST = 12;
+export { BCRYPT_COST } from '../../common/password';
 
 export interface SeedResult {
   inserted: number;
