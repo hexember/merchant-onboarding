@@ -26,7 +26,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   `ownerNationalId`, `ownerEmail`, `ownerPhone`. Mass-assignment fields rejected (400); SALES
   sending `salesOwnerId` → 403. `APPLICATION_CREATED` / `APPLICATION_UPDATED` audit rows in the
   same transaction. Include the SALES-vs-SALES bypass tests from docs/adrs/testing.md.
-- [ ] **submit-lifecycle** — The state machine from docs/adrs/workflow.md §1.2 as a unit-tested
+- [x] **submit-lifecycle** — branch `ai/submit-lifecycle-20261024-1701`, PR https://github.com/hexember/merchant-onboarding/pull/9 — The state machine from docs/adrs/workflow.md §1.2 as a unit-tested
   pure module (every allowed and rejected transition; `KYB_COMPLETE` unreachable from user
   actions); `POST /applications/:id/submit` from `DRAFT` / `INFO_REQUESTED` to `RISK_REVIEW` in one
   transaction (`kybStatus=PENDING`, cleared KYB fields, `submission_count` + 1, audit row);
@@ -54,6 +54,16 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- **Decision coming in reviewer-decision:** docs/adrs/workflow.md §1.2 gives APPROVE the guard
+  `kybStatus = COMPLETED` (and testing.md expects 409 for approving with `kybStatus=FAILED`), but
+  the paragraph after the table says APPROVE is possible when `kybStatus != COMPLETED`. The loop
+  will keep the guard (409) and fix the ADR wording in that PR unless you say otherwise.
+- Defaults taken in submit-lifecycle (#9): submit also clears `kyb_last_attempt_at`;
+  `submitted_at` holds the latest submit; decision note/date untouched on resubmit; submit returns
+  200 and ignores the body.
+- Follow-up (small): every e2e run prints the pg warning "client.query() when the client is
+  already executing a query is deprecated" (predates #9).
 
 - Defaults taken in applications-crud (#8): every NOT NULL column required on create; KYB fields,
   `version` and `meta` left out of responses; list `{ items, page, limit, total }` (limit 20, max
