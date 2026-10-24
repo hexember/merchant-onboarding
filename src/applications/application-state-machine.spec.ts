@@ -5,14 +5,11 @@ import {
   DECISION_ACTIONS,
   DecisionAction,
   OPERATIONS,
-  TERMINAL_STATUSES,
   TRANSITIONS,
   TransitionAction,
   TransitionActorType,
-  USER_TRANSITION_ACTIONS,
   UserTransitionAction,
   allowedStatuses,
-  canTransition,
   fromStatuses,
   isOperationAllowed,
   isRoleAllowed,
@@ -24,6 +21,15 @@ import {
 const S = ApplicationStatus;
 const A = TransitionAction;
 const ALL_STATUSES = Object.values(ApplicationStatus);
+// Statuses with no outgoing transition (docs/adrs/workflow.md §1.1).
+const TERMINAL_STATUSES: readonly ApplicationStatus[] = [S.APPROVED, S.REJECTED];
+// Every action a user may trigger, i.e. every TransitionAction except KYB_COMPLETE.
+const USER_TRANSITION_ACTIONS: readonly UserTransitionAction[] = [
+  A.SUBMIT,
+  A.APPROVE,
+  A.REJECT,
+  A.REQUEST_INFO,
+];
 
 // Every status must be classified here, so a new enum value fails until it is.
 // A missing action means "not allowed from this status".
@@ -64,7 +70,7 @@ describe('application state machine', () => {
     it.each(STATUS_ACTION_PAIRS)('%s --%s-->', (status, action) => {
       const expected = EXPECTED[status][action] ?? null;
       expect(nextStatus(status, action)).toBe(expected);
-      expect(canTransition(status, action)).toBe(expected !== null);
+      expect(nextStatus(status, action) !== null).toBe(expected !== null);
     });
 
     it.each([
@@ -78,7 +84,6 @@ describe('application state machine', () => {
       [S.RISK_REVIEW, A.REQUEST_INFO],
     ] as [ApplicationStatus, UserTransitionAction][])('rejects %s --%s-->', (status, action) => {
       expect(nextStatus(status, action)).toBeNull();
-      expect(canTransition(status, action)).toBe(false);
     });
 
     it.each(TERMINAL_STATUSES)('allows nothing from terminal status %s', (status) => {
@@ -102,7 +107,6 @@ describe('application state machine', () => {
 
     it.each(ALL_STATUSES)('nextStatus(%s, KYB_COMPLETE cast) is null', (status) => {
       expect(nextStatus(status, A.KYB_COMPLETE as unknown as UserTransitionAction)).toBeNull();
-      expect(canTransition(status, A.KYB_COMPLETE as unknown as UserTransitionAction)).toBe(false);
     });
 
     it('no user action from any status yields UNDER_REVIEW', () => {

@@ -16,9 +16,14 @@ import {
 } from 'class-validator';
 import { BusinessType } from '../application.enums';
 
-// Validation formats shared by the create and update DTOs (see the plan's Risks for the choices).
+// Validation formats shared by the create and update DTOs; lengths match the columns in
+// docs/adrs/database.md.
+// Exactly 4 digits: a merchant category code, e.g. 5411.
 export const MCC_PATTERN = /^\d{4}$/;
+// Exactly 3 uppercase letters: an ISO 4217 currency code, e.g. NPR.
 export const CURRENCY_PATTERN = /^[A-Z]{3}$/;
+// Optional leading +, a digit, then 5–28 digits/spaces/()/-: 6–29 chars, or 7–30 with the +
+// (fits maxLength 30), e.g. +977-0000000123.
 export const PHONE_PATTERN = /^\+?[0-9][0-9 ()-]{5,28}$/;
 export const WEBSITE_URL_OPTIONS = { protocols: ['http', 'https'], require_protocol: true };
 // Responses show the last 4 characters of `taxId` / `ownerNationalId`, so a short id would be
