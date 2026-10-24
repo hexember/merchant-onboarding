@@ -45,20 +45,10 @@ password.
 
 ### Logging
 
-Every log line is one JSON object with `timestamp`, `level`, `context`, `message` and, when
-present, `meta` and `error`. `fatal`, `error` and `warn` go to stderr; everything else goes to
-stdout. `LOG_LEVEL=fatal|error|warn|log|debug|verbose` sets the minimum level (default `log`).
-Stacks are omitted when `NODE_ENV=production`, including stack strings passed as a message,
-context or `meta` value. Sensitive keys in `meta` are redacted or masked. Loose string arguments
-have no key, so they are dropped and only counted (`meta.droppedValues`); `message` strings are
-not scanned: put values in `meta` under a key, never in the message. Database query errors are
-logged as `Database query failed` plus their SQLSTATE `code`, because the driver's message can
-echo input values. Request failures log the matched route pattern (for example
-`/applications/:id`, or `[unmatched]`), never the raw path. A 5xx response body is always the
-generic status text. If the app or the seed fails to start, exactly one JSON line is written to
-stderr and the process exits with code 1. To add an
-output, implement `LogTransport` and add it to the `LOG_TRANSPORTS` factory in
-`src/logging/logging.module.ts`.
+Log with `logInfo(context, message, meta)` and `logError(context, message, meta)` from
+`src/logging/logger.ts` instead of `console.*`. Each call prints one JSON line (`logError` to
+stderr). Sensitive keys in `meta` are redacted or masked first; put values in `meta`, never in
+the message. When `NODE_ENV=production`, nothing is printed.
 
 ### Migrations
 

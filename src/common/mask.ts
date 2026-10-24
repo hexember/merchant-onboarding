@@ -25,7 +25,7 @@ export function maskEmail(value: string): string {
   return value.charAt(0) + EMAIL_MASK + value.slice(at);
 }
 
-/** `'+1-555-0100-123'` → `'••••••123'`. Fewer than 3 digits → `MASK`. */
+/** `'+977-9800000123'` → `'••••••123'`. Fewer than 3 digits → `MASK`. */
 export function maskPhone(value: string): string {
   const digits = value.replace(/\D/g, '');
   if (digits.length < 3) {

@@ -51,9 +51,6 @@ export function resolveTestDatabaseEnv(env: Record<string, string | undefined>):
 /** Loads .env (a missing file is fine; process env wins) and switches DB_NAME to the test DB. */
 export function applyTestDatabaseEnv(): void {
   config({ quiet: true });
-  // Always override, like DB_NAME: a developer's .env (e.g. LOG_LEVEL=error) must not hide the
-  // warn lines the e2e tests assert on. NODE_ENV is left alone.
-  process.env.LOG_LEVEL = 'log';
   const resolved = resolveTestDatabaseEnv(process.env);
   process.env.DB_NAME = resolved.DB_NAME;
   process.env.DB_NAME_ORIGINAL = resolved.DB_NAME_ORIGINAL;
