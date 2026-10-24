@@ -12,7 +12,13 @@ import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
 import { UsersRepository } from '../users/users.repository';
 import { ApplicationStatus, KybStatus } from './application.enums';
-import { isEditable } from './application-status';
+import {
+  ApplicationOperation,
+  isOperationAllowed,
+  isRoleAllowed,
+  nextStatus,
+  TransitionAction,
+} from './application-state-machine';
 import {
   ApplicationChanges,
   ApplicationsRepository,
@@ -37,6 +43,8 @@ export const SALES_OWNER_NOT_SALES_MESSAGE = 'salesOwnerId must be a SALES user'
 export const NO_FIELDS_TO_UPDATE_MESSAGE = 'No fields to update';
 export const NOT_EDITABLE_MESSAGE = 'Application can only be edited in DRAFT or INFO_REQUESTED';
 export const CONCURRENT_MODIFICATION_MESSAGE = 'Application was changed by another request';
+export const NOT_SUBMITTABLE_MESSAGE =
+  'Application can only be submitted from DRAFT or INFO_REQUESTED';
 
 export const INVALID_STATE_TRANSITION_CODE = 'INVALID_STATE_TRANSITION';
 export const CONCURRENT_MODIFICATION_CODE = 'CONCURRENT_MODIFICATION';
@@ -50,9 +58,17 @@ function copyField<K extends keyof UpdateApplicationDto>(
   target[key] = source[key];
 }
 
+/** What the submit transaction hands back: the response, plus the inputs of the enqueue seam. */
+interface SubmitResult {
+  response: ApplicationResponseDto;
+  applicationId: string;
+  submissionNo: number;
+}
+
 /**
- * Create, list, read and edit applications (docs/adrs/auth.md matrix, docs/adrs/workflow.md §1.2
- * "Operations that do not change status"). Every read goes through the scoped
+ * Create, list, read, edit and submit applications (docs/adrs/auth.md matrix,
+ * docs/adrs/workflow.md §1.2). Which statuses allow an edit and which transitions exist come from
+ * the state machine module (`application-state-machine.ts`). Every read goes through the scoped
  * `ApplicationsRepository`; each write and its audit row share one transaction. Responses are
  * masked by `toApplicationResponse`. Nothing here logs the payload.
  */
@@ -151,13 +167,8 @@ export class ApplicationsService {
       if (app === null) {
         throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
       }
-      if (!isEditable(app.status)) {
-        throw new ConflictException({
-          statusCode: 409,
-          error: 'Conflict',
-          message: NOT_EDITABLE_MESSAGE,
-          code: INVALID_STATE_TRANSITION_CODE,
-        });
+      if (!isOperationAllowed(ApplicationOperation.UPDATE, app.status)) {
+        throw this.conflict(NOT_EDITABLE_MESSAGE, INVALID_STATE_TRANSITION_CODE);
       }
       const updated = await this.applicationsRepository.updateIfEditable(
         app.id,
@@ -167,12 +178,7 @@ export class ApplicationsService {
         manager,
       );
       if (!updated) {
-        throw new ConflictException({
-          statusCode: 409,
-          error: 'Conflict',
-          message: CONCURRENT_MODIFICATION_MESSAGE,
-          code: CONCURRENT_MODIFICATION_CODE,
-        });
+        throw this.conflict(CONCURRENT_MODIFICATION_MESSAGE, CONCURRENT_MODIFICATION_CODE);
       }
       // Field names only, never their values.
       await this.auditLogService.record(
@@ -189,6 +195,61 @@ export class ApplicationsService {
       );
       return toApplicationResponse(await this.reReadInTransaction(app.id, actor, manager));
     });
+  }
+
+  /**
+   * SUBMIT (docs/adrs/workflow.md §1.2-§1.3): DRAFT or INFO_REQUESTED → RISK_REVIEW. One
+   * transaction does the scoped read, the single conditional write (which also resets the KYB
+   * result) and the APPLICATION_SUBMITTED audit row.
+   */
+  async submit(id: string, actor: AuthUser): Promise<ApplicationResponseDto> {
+    // Defence in depth behind @Roles: REVIEWER (or any other role) → 403 before any DB work.
+    if (!isRoleAllowed(TransitionAction.SUBMIT, actor.role)) {
+      throw new ForbiddenException();
+    }
+
+    const result = await this.dataSource.transaction(async (manager): Promise<SubmitResult> => {
+      const app = await this.applicationsRepository.findAccessible(id, actor, manager);
+      if (app === null) {
+        throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
+      }
+      const to = nextStatus(app.status, TransitionAction.SUBMIT);
+      if (to === null) {
+        throw this.conflict(NOT_SUBMITTABLE_MESSAGE, INVALID_STATE_TRANSITION_CODE);
+      }
+      const submittedOk = await this.applicationsRepository.submitIfAllowed(
+        app.id,
+        app.version,
+        to,
+        actor,
+        manager,
+      );
+      if (!submittedOk) {
+        throw this.conflict(CONCURRENT_MODIFICATION_MESSAGE, CONCURRENT_MODIFICATION_CODE);
+      }
+      const submitted = await this.reReadInTransaction(app.id, actor, manager);
+      // Statuses and the counter only; `submissionNo` is read back from the row.
+      await this.auditLogService.record(
+        {
+          actorType: AuditActorType.USER,
+          actorId: actor.id,
+          actorRole: actor.role,
+          action: AuditAction.APPLICATION_SUBMITTED,
+          entityType: AUDIT_ENTITY_TYPE,
+          entityId: app.id,
+          meta: { from: app.status, to, submissionNo: submitted.submissionCount },
+        },
+        manager,
+      );
+      return {
+        response: toApplicationResponse(submitted),
+        applicationId: app.id,
+        submissionNo: submitted.submissionCount,
+      };
+    });
+
+    // After the commit: the kyb-worker item enqueues jobId kyb-check:{applicationId}:{submissionNo} here (docs/adrs/kyb-check.md). Nothing is enqueued yet.
+    return result.response;
   }
 
   /**
@@ -229,6 +290,11 @@ export class ApplicationsService {
       }
     }
     return changes;
+  }
+
+  /** A 409 with the hand-built body the API uses (there is no global exception filter). */
+  private conflict(message: string, code: string): ConflictException {
+    return new ConflictException({ statusCode: 409, error: 'Conflict', message, code });
   }
 
   /**

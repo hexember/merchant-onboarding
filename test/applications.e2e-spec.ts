@@ -8,11 +8,15 @@ import { DataSource, UpdateQueryBuilder } from 'typeorm';
 import { AppModule } from '../src/app.module';
 import {
   APPLICATION_NOT_FOUND_MESSAGE,
+  CONCURRENT_MODIFICATION_CODE,
+  CONCURRENT_MODIFICATION_MESSAGE,
   INVALID_STATE_TRANSITION_CODE,
   NOT_EDITABLE_MESSAGE,
+  NOT_SUBMITTABLE_MESSAGE,
   SALES_OWNER_NOT_SALES_MESSAGE,
   SALES_OWNER_REQUIRED_MESSAGE,
 } from '../src/applications/applications.service';
+import { ApplicationsRepository } from '../src/applications/applications.repository';
 import { AuditLogService } from '../src/audit/audit-log.service';
 import { UserRole } from '../src/common/common.enums';
 import { BCRYPT_COST } from '../src/common/password';
@@ -87,6 +91,14 @@ const RESPONSE_KEYS = [
   'updatedAt',
 ];
 
+// The SET clause (SQL text before WHERE) of the single SUBMIT UPDATE TypeORM builds: one version
+// and one updated_at assignment, no auto-added ones.
+const SUBMIT_SET_CLAUSE =
+  'UPDATE "merchant_applications" SET "status" = $1, "kyb_status" = $2, "kyb_level" = $3, ' +
+  '"kyb_score" = $4, "kyb_attempts" = $5, "kyb_last_attempt_at" = $6, ' +
+  '"submission_count" = "submission_count" + 1, "submitted_at" = now(), ' +
+  '"version" = "version" + 1, "updated_at" = now()';
+
 const UNAUTHORIZED_BODY = { statusCode: 401, message: 'Unauthorized' };
 const FORBIDDEN_BODY = { statusCode: 403, message: 'Forbidden' };
 const INTERNAL_ERROR_BODY = { statusCode: 500, message: 'Internal server error' };
@@ -101,6 +113,12 @@ const NOT_EDITABLE_BODY = {
   message: NOT_EDITABLE_MESSAGE,
   code: INVALID_STATE_TRANSITION_CODE,
 };
+const NOT_SUBMITTABLE_BODY = {
+  statusCode: 409,
+  error: 'Conflict',
+  message: NOT_SUBMITTABLE_MESSAGE,
+  code: INVALID_STATE_TRANSITION_CODE,
+};
 
 interface ApplicationBody {
   id: string;
@@ -110,6 +128,7 @@ interface ApplicationBody {
   businessName: string;
   websiteUrl: string | null;
   status: string;
+  submittedAt: string | null;
   taxId: string;
   ownerNationalId: string;
   ownerEmail: string;
@@ -133,7 +152,39 @@ interface ApplicationRow {
   version: number;
   tax_id: string;
   sales_owner_id: string;
+  assigned_reviewer_id: string | null;
+  kyb_status: string;
+  kyb_level: string | null;
+  kyb_score: number | null;
+  kyb_attempts: number;
+  kyb_last_attempt_at: Date | null;
+  submission_count: number;
+  submitted_at: Date | null;
 }
+
+// Optional columns `forceState` can set. Each maps to its own parameterised test-only UPDATE.
+interface ForcedState {
+  status?: string;
+  assignedReviewerId?: string | null;
+  kybStatus?: string;
+  kybLevel?: string | null;
+  kybScore?: number | null;
+  kybAttempts?: number;
+  kybLastAttemptAt?: Date | null;
+  submissionCount?: number;
+}
+
+// Fixed column names only: the values always go in as parameters.
+const FORCED_COLUMNS: ReadonlyArray<[keyof ForcedState, string]> = [
+  ['status', 'status'],
+  ['assignedReviewerId', 'assigned_reviewer_id'],
+  ['kybStatus', 'kyb_status'],
+  ['kybLevel', 'kyb_level'],
+  ['kybScore', 'kyb_score'],
+  ['kybAttempts', 'kyb_attempts'],
+  ['kybLastAttemptAt', 'kyb_last_attempt_at'],
+  ['submissionCount', 'submission_count'],
+];
 
 interface AuditRow {
   actor_type: string;
@@ -285,37 +336,62 @@ describe('Applications (e2e)', () => {
     );
   }
 
+  async function submit(token: string | undefined, id: string): Promise<request.Response> {
+    const req = request(server()).post(`/applications/${id}/submit`);
+    if (token !== undefined) {
+      req.set('Authorization', `Bearer ${token}`);
+    }
+    return track(await req);
+  }
+
   async function createAs(token: string, extra: object = {}): Promise<ApplicationBody> {
     const res = await post(token, { ...PAYLOAD, ...extra });
     expect(res.status).toBe(201);
     return res.body as ApplicationBody;
   }
 
-  // Test-only SQL: puts a row into a state the API cannot reach yet (no submit/assign endpoints).
-  async function forceState(
-    id: string,
-    state: { status?: string; assignedReviewerId?: string | null },
-  ): Promise<void> {
-    if (state.status !== undefined) {
-      await dataSource.query('UPDATE merchant_applications SET status = $1 WHERE id = $2', [
-        state.status,
-        id,
-      ]);
-    }
-    if (state.assignedReviewerId !== undefined) {
-      await dataSource.query(
-        'UPDATE merchant_applications SET assigned_reviewer_id = $1 WHERE id = $2',
-        [state.assignedReviewerId, id],
-      );
+  // Test-only SQL: puts a row into a state the API cannot reach yet (no KYB worker, assign or
+  // decision endpoints), e.g. a finished KYB result before a resubmit.
+  async function forceState(id: string, state: ForcedState): Promise<void> {
+    for (const [key, column] of FORCED_COLUMNS) {
+      const value = state[key];
+      if (value !== undefined) {
+        await dataSource.query(`UPDATE merchant_applications SET ${column} = $1 WHERE id = $2`, [
+          value,
+          id,
+        ]);
+      }
     }
   }
 
   async function applicationRow(id: string): Promise<ApplicationRow | undefined> {
     const rows: ApplicationRow[] = await dataSource.query(
-      'SELECT business_name, website_url, status, version, tax_id, sales_owner_id FROM merchant_applications WHERE id = $1',
+      `SELECT business_name, website_url, status, version, tax_id, sales_owner_id,
+              assigned_reviewer_id, kyb_status, kyb_level, kyb_score, kyb_attempts,
+              kyb_last_attempt_at, submission_count, submitted_at
+         FROM merchant_applications WHERE id = $1`,
       [id],
     );
     return rows[0];
+  }
+
+  async function submittedAuditCount(): Promise<number> {
+    return (await auditRows()).filter((row) => row.action === 'APPLICATION_SUBMITTED').length;
+  }
+
+  // Captures the SQL text of every UPDATE on merchant_applications built while `run` executes.
+  async function capturingUpdates<T>(run: () => Promise<T>): Promise<{ result: T; updates: string[] }> {
+    const sqlSpy = jest.spyOn(UpdateQueryBuilder.prototype, 'getQueryAndParameters');
+    try {
+      const result = await run();
+      // Read before mockRestore, which also clears the recorded results.
+      const updates = sqlSpy.mock.results
+        .map((entry) => (entry.value as [string, unknown[]])[0])
+        .filter((sql) => sql.includes('"merchant_applications"'));
+      return { result, updates };
+    } finally {
+      sqlSpy.mockRestore();
+    }
   }
 
   async function applicationCount(): Promise<number> {
@@ -769,6 +845,264 @@ describe('Applications (e2e)', () => {
     });
   });
 
+  describe('POST /applications/:id/submit', () => {
+    it('the SALES owner submits a DRAFT: 200, masked, KYB reset, counter 1, one conditional UPDATE, audited', async () => {
+      const a = await createAs(salesAToken);
+
+      const { result: res, updates } = await capturingUpdates(() => submit(salesAToken, a.id));
+
+      expect(res.status).toBe(200);
+      const body = res.body as ApplicationBody;
+      expectMasked(body);
+      expect(body).toMatchObject({ id: a.id, status: 'RISK_REVIEW', salesOwnerId: salesAId });
+      expect(body.submittedAt).not.toBeNull();
+      const row = await applicationRow(a.id);
+      expect(row).toMatchObject({
+        status: 'RISK_REVIEW',
+        kyb_status: 'PENDING',
+        kyb_level: null,
+        kyb_score: null,
+        kyb_attempts: 0,
+        kyb_last_attempt_at: null,
+        submission_count: 1,
+        version: 2,
+      });
+      expect(row?.submitted_at).not.toBeNull();
+
+      // One UPDATE: exactly one version and one updated_at assignment, none auto-added.
+      expect(updates).toHaveLength(1);
+      const setClause = updates[0]?.split(' WHERE ')[0] ?? '';
+      expect(setClause).toBe(SUBMIT_SET_CLAUSE);
+      expect(setClause.match(/"version" =/g)).toHaveLength(1);
+      expect(setClause.match(/"updated_at" =/g)).toHaveLength(1);
+      expect(updates[0]).toContain('"version" = $');
+
+      const audits = await auditRows();
+      expect(audits.map((entry) => entry.action)).toEqual([
+        'APPLICATION_CREATED',
+        'APPLICATION_SUBMITTED',
+      ]);
+      expect(audits[1]).toEqual({
+        actor_type: 'USER',
+        actor_id: salesAId,
+        actor_role: 'SALES',
+        action: 'APPLICATION_SUBMITTED',
+        entity_type: 'merchant_application',
+        entity_id: a.id,
+        meta: { from: 'DRAFT', to: 'RISK_REVIEW', submissionNo: 1 },
+      });
+    });
+
+    it('ADMIN resubmits from INFO_REQUESTED: previous KYB result cleared, counter 2, reviewer kept', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, {
+        status: 'INFO_REQUESTED',
+        kybStatus: 'COMPLETED',
+        kybLevel: 'HIGH',
+        kybScore: 78,
+        kybAttempts: 2,
+        kybLastAttemptAt: new Date('2026-01-01T00:00:00.000Z'),
+        submissionCount: 1,
+        assignedReviewerId: reviewerId,
+      });
+
+      const res = await submit(adminToken, a.id);
+
+      expect(res.status).toBe(200);
+      expect(res.body as ApplicationBody).toMatchObject({
+        status: 'RISK_REVIEW',
+        assignedReviewerId: reviewerId,
+      });
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        status: 'RISK_REVIEW',
+        kyb_status: 'PENDING',
+        kyb_level: null,
+        kyb_score: null,
+        kyb_attempts: 0,
+        kyb_last_attempt_at: null,
+        submission_count: 2,
+        assigned_reviewer_id: reviewerId,
+      });
+      expect((await auditRows()).at(-1)).toEqual({
+        actor_type: 'USER',
+        actor_id: adminId,
+        actor_role: 'ADMIN',
+        action: 'APPLICATION_SUBMITTED',
+        entity_type: 'merchant_application',
+        entity_id: a.id,
+        meta: { from: 'INFO_REQUESTED', to: 'RISK_REVIEW', submissionNo: 2 },
+      });
+    });
+
+    it("ADMIN submits SALES B's DRAFT: 200", async () => {
+      const b = await createAs(salesBToken);
+
+      const res = await submit(adminToken, b.id);
+
+      expect(res.status).toBe(200);
+      await expect(applicationRow(b.id)).resolves.toMatchObject({
+        status: 'RISK_REVIEW',
+        submission_count: 1,
+      });
+    });
+
+    it("denied: SALES A submitting SALES B's application gets the same 404 as an unknown or malformed id; nothing changes", async () => {
+      const b = await createAs(salesBToken);
+      const before = await applicationRow(b.id);
+      const auditsBefore = await auditRows();
+
+      const outOfScope = await submit(salesAToken, b.id);
+      const unknown = await submit(salesAToken, FAKE_UUID);
+      const malformed = await submit(salesAToken, 'not-a-uuid');
+
+      for (const res of [outOfScope, unknown, malformed]) {
+        expect(res.status).toBe(404);
+        expect(res.body).toEqual(NOT_FOUND_BODY);
+      }
+      await expect(applicationRow(b.id)).resolves.toEqual(before);
+      await expect(auditRows()).resolves.toEqual(auditsBefore);
+    });
+
+    it('denied: REVIEWER, even the assigned one, gets 403; on an unknown id too', async () => {
+      const a = await createAs(salesAToken);
+      await forceState(a.id, { assignedReviewerId: reviewerId });
+      const before = await applicationRow(a.id);
+
+      const assigned = await submit(reviewerToken, a.id);
+      const unknown = await submit(reviewerToken, FAKE_UUID);
+
+      for (const res of [assigned, unknown]) {
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual(FORBIDDEN_BODY);
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect((await auditRows()).map((entry) => entry.action)).toEqual(['APPLICATION_CREATED']);
+    });
+
+    it.each(['RISK_REVIEW', 'UNDER_REVIEW', 'APPROVED', 'REJECTED'])(
+      'denied: submitting in %s gets 409 INVALID_STATE_TRANSITION, row unchanged, no audit',
+      async (status) => {
+        const a = await createAs(salesAToken);
+        await forceState(a.id, { status });
+        const before = await applicationRow(a.id);
+
+        const res = await submit(salesAToken, a.id);
+
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual(NOT_SUBMITTABLE_BODY);
+        await expect(applicationRow(a.id)).resolves.toEqual(before);
+        expect((await auditRows()).map((entry) => entry.action)).toEqual(['APPLICATION_CREATED']);
+      },
+    );
+
+    it('denied: a second submit through the API gets 409 INVALID_STATE_TRANSITION; counter stays 1', async () => {
+      const a = await createAs(salesAToken);
+      expect((await submit(salesAToken, a.id)).status).toBe(200);
+
+      const again = await submit(salesAToken, a.id);
+
+      expect(again.status).toBe(409);
+      expect(again.body).toEqual(NOT_SUBMITTABLE_BODY);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({ submission_count: 1 });
+      await expect(submittedAuditCount()).resolves.toBe(1);
+    });
+
+    it('denied: PATCH after a real submit gets 409 NOT_EDITABLE', async () => {
+      const a = await createAs(salesAToken);
+      expect((await submit(salesAToken, a.id)).status).toBe(200);
+      const before = await applicationRow(a.id);
+
+      const res = await patch(salesAToken, a.id, { businessName: 'Changed' });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual(NOT_EDITABLE_BODY);
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+    });
+
+    it('denied: a lost race (version bumped between read and write) gets 409 CONCURRENT_MODIFICATION', async () => {
+      const a = await createAs(salesAToken);
+      const repo = app.get(ApplicationsRepository);
+      // Reference to the real method, taken before spying, so the mock does not call itself.
+      const real = repo.findAccessible.bind(repo);
+      const spy = jest
+        .spyOn(repo, 'findAccessible')
+        .mockImplementationOnce(async (id, actor, manager) => {
+          const found = await real(id, actor, manager);
+          // Separate pool connection; the SELECT above holds no row lock, so this does not block.
+          await dataSource.query(
+            'UPDATE merchant_applications SET version = version + 1 WHERE id = $1',
+            [id],
+          );
+          return found;
+        });
+      let res: request.Response;
+      try {
+        res = await submit(salesAToken, a.id);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        statusCode: 409,
+        error: 'Conflict',
+        message: CONCURRENT_MODIFICATION_MESSAGE,
+        code: CONCURRENT_MODIFICATION_CODE,
+      });
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        status: 'DRAFT',
+        kyb_status: 'NOT_STARTED',
+        submission_count: 0,
+        version: 2,
+      });
+      await expect(submittedAuditCount()).resolves.toBe(0);
+    });
+
+    it('two concurrent submits of one DRAFT: one 200, one 409; counter 1, one audit row', async () => {
+      const a = await createAs(salesAToken);
+
+      const results = await Promise.all([submit(salesAToken, a.id), submit(salesAToken, a.id)]);
+
+      expect(results.map((res) => res.status).sort()).toEqual([200, 409]);
+      const loser = results.find((res) => res.status === 409);
+      expect([CONCURRENT_MODIFICATION_CODE, INVALID_STATE_TRANSITION_CODE]).toContain(
+        (loser?.body as { code?: string } | undefined)?.code,
+      );
+      await expect(applicationRow(a.id)).resolves.toMatchObject({
+        status: 'RISK_REVIEW',
+        submission_count: 1,
+      });
+      await expect(submittedAuditCount()).resolves.toBe(1);
+    });
+
+    it('denied: no token gets 401', async () => {
+      const a = await createAs(salesAToken);
+
+      const res = await submit(undefined, a.id);
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(UNAUTHORIZED_BODY);
+      await expect(applicationRow(a.id)).resolves.toMatchObject({ status: 'DRAFT', version: 1 });
+    });
+
+    it('denied: a tampered token (role re-encoded as ADMIN) gets 401', async () => {
+      const b = await createAs(salesBToken);
+      const [header, payload, signature] = salesAToken.split('.');
+      const tampered = [
+        header,
+        base64UrlJson({ ...decodeSegment(payload), role: 'ADMIN' }),
+        signature,
+      ].join('.');
+
+      const res = await submit(tampered, b.id);
+
+      expect(res.status).toBe(401);
+      expect(res.body).toEqual(UNAUTHORIZED_BODY);
+      await expect(applicationRow(b.id)).resolves.toMatchObject({ status: 'DRAFT', version: 1 });
+      await expect(submittedAuditCount()).resolves.toBe(0);
+    });
+  });
+
   describe('same transaction as the audit row', () => {
     it('a failed audit write on POST gives 500 and leaves no application row', async () => {
       const spy = jest
@@ -803,6 +1137,30 @@ describe('Applications (e2e)', () => {
       await expect(applicationRow(a.id)).resolves.toEqual(before);
       expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
     });
+
+    it('a failed audit write on submit gives 500 and leaves the row unchanged', async () => {
+      const a = await createAs(salesAToken);
+      const before = await applicationRow(a.id);
+      const spy = jest
+        .spyOn(app.get(AuditLogService), 'record')
+        .mockRejectedValueOnce(new Error('audit write failed (test)'));
+      try {
+        const res = await submit(salesAToken, a.id);
+
+        expect(res.status).toBe(500);
+        expect(res.body).toEqual(INTERNAL_ERROR_BODY);
+      } finally {
+        spy.mockRestore();
+      }
+      await expect(applicationRow(a.id)).resolves.toEqual(before);
+      expect(before).toMatchObject({
+        status: 'DRAFT',
+        kyb_status: 'NOT_STARTED',
+        submission_count: 0,
+        version: 1,
+      });
+      expect((await auditRows()).map((row) => row.action)).toEqual(['APPLICATION_CREATED']);
+    });
   });
 
   it('never returns, logs or audits a raw sensitive value or a token', async () => {
@@ -812,6 +1170,9 @@ describe('Applications (e2e)', () => {
     await get(adminToken, `/applications/${b.id}`);
     await patch(salesAToken, a.id, { ownerEmail: 'owner2@example.com' });
     await post(salesAToken, { ...PAYLOAD, status: 'APPROVED' });
+    // Submit: the masked response, the APPLICATION_SUBMITTED audit row and a 409 body.
+    expect((await submit(salesAToken, a.id)).status).toBe(200);
+    expect((await submit(salesAToken, a.id)).status).toBe(409);
     const spy = jest
       .spyOn(app.get(AuditLogService), 'record')
       .mockRejectedValueOnce(new Error('audit write failed (test)'));
@@ -821,7 +1182,9 @@ describe('Applications (e2e)', () => {
       spy.mockRestore();
     }
 
-    const stored = JSON.stringify(await auditRows());
+    const audits = await auditRows();
+    expect(audits.map((row) => row.action)).toContain('APPLICATION_SUBMITTED');
+    const stored = JSON.stringify(audits);
     const texts = [capturedText(), stored, ...responseTexts];
     const secrets = [
       RAW_TAX_ID,
@@ -840,7 +1203,7 @@ describe('Applications (e2e)', () => {
     }
   });
 
-  it('documents the four operations in Swagger with the bearer security requirement', async () => {
+  it('documents the five operations in Swagger with the bearer security requirement', async () => {
     const res = await request(server()).get('/docs-json').expect(200);
 
     const body = res.body as {
@@ -851,6 +1214,7 @@ describe('Applications (e2e)', () => {
       body.paths['/applications']?.get,
       body.paths['/applications/{id}']?.get,
       body.paths['/applications/{id}']?.patch,
+      body.paths['/applications/{id}/submit']?.post,
     ];
     for (const operation of operations) {
       expect(operation).toBeDefined();

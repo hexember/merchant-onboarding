@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
@@ -82,5 +92,20 @@ export class ApplicationsController {
     @CurrentUser() actor: AuthUser,
   ): Promise<ApplicationResponseDto> {
     return this.applicationsService.update(id, dto, actor);
+  }
+
+  @Post(':id/submit')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.ADMIN, UserRole.SALES)
+  @ApiOperation({ summary: 'Submit a DRAFT or INFO_REQUESTED application for the KYB check' })
+  @ApiOkResponse({ type: ApplicationResponseDto })
+  @ApiForbiddenResponse({ description: 'Wrong role' })
+  @ApiNotFoundResponse({ description: 'Unknown id or not visible to the caller' })
+  @ApiConflictResponse({
+    description:
+      'Not submittable in its status (INVALID_STATE_TRANSITION) or changed concurrently (CONCURRENT_MODIFICATION)',
+  })
+  submit(@Param('id') id: string, @CurrentUser() actor: AuthUser): Promise<ApplicationResponseDto> {
+    return this.applicationsService.submit(id, actor);
   }
 }
