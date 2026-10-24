@@ -40,7 +40,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   allowed statuses per §1.2) and `POST /applications/:id/transfer-owner` (target must be SALES,
   non-terminal statuses), with audit rows and the bypass tests (SALES cannot assign or transfer,
   ADMIN cannot transfer to a non-SALES user, A loses access after transfer to B).
-- [ ] **reviewer-decision** — `POST /applications/:id/decision` (APPROVE / REJECT / REQUEST_INFO)
+- [x] **reviewer-decision** — branch `ai/reviewer-decision-20261024-1833`, PR https://github.com/hexember/merchant-onboarding/pull/12 — `POST /applications/:id/decision` (APPROVE / REJECT / REQUEST_INFO)
   for the assigned REVIEWER only, guards from §1.2 (APPROVE needs `kybStatus=COMPLETED`), 409 for
   invalid states and concurrent decisions, `DECISION_RECORDED` audit row, request info → resubmit
   → new KYB check end to end.
@@ -54,6 +54,13 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- Defaults taken in reviewer-decision (#12): note optional for all decisions, trimmed, max 2000,
+  no NUL, rejected if it contains the application's own raw tax/national ID; note returned
+  unmasked to viewers, never in audit or logs; REQUEST_INFO keeps the reviewer; note and
+  `decided_at` survive resubmit until the next decision.
+- Follow-up (small): other free-text DTO fields (business name, etc.) probably accept NUL bytes
+  and would give a 500 instead of 400; the decision note is fixed in #12.
 
 - Defaults taken in assign-transfer (#11): assigning the same reviewer / transferring to the
   current owner → 200 with a version bump and an audit row `from === to`; target check (400)
@@ -72,10 +79,9 @@ loop could not do itself. Newest first.
   applications left in `RISK_REVIEW` (Redis down at enqueue, stalled jobs). Both are documented
   trade-offs, not built.
 
-- **Decision coming in reviewer-decision:** docs/adrs/workflow.md §1.2 gives APPROVE the guard
-  `kybStatus = COMPLETED` (and testing.md expects 409 for approving with `kybStatus=FAILED`), but
-  the paragraph after the table says APPROVE is possible when `kybStatus != COMPLETED`. The loop
-  will keep the guard (409) and fix the ADR wording in that PR unless you say otherwise.
+- **Decision taken in reviewer-decision (#12):** APPROVE keeps the `kybStatus = COMPLETED` guard
+  (409 `KYB_NOT_COMPLETED`); the contradicting sentence in docs/adrs/workflow.md §1.2 is replaced
+  in that PR. Say so if you'd rather allow approving after a failed KYB check.
 - Defaults taken in submit-lifecycle (#9): submit also clears `kyb_last_attempt_at`;
   `submitted_at` holds the latest submit; decision note/date untouched on resubmit; submit returns
   200 and ignores the body.
