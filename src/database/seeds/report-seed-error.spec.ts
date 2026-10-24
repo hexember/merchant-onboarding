@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { AppLogger } from '../../logging/app-logger.service';
 import type { LogEntry } from '../../logging/log-entry';
 import type { LogTransport } from '../../logging/log-transport';
-import { logSeedFailure, writeSeedFailureWithoutContext } from './seed-failure';
+import { logSeedFailure, writeSeedFailureWithoutContext } from './report-seed-error';
 
 // Fake fixture values only.
 const FAKE_HASH = 'fake-hash';
