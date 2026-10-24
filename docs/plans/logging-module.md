@@ -24,7 +24,7 @@ on a 500. No new dependency is added.
   - Wiring: `src/app.module.ts`, `src/main.ts` (`bufferLogs` + `useLogger`),
     `src/database/seeds/seed.ts` (replace `describeError` with `serializeError`),
     `src/database/seeds/seed.module.ts` (import `LoggingModule`), and a new
-    `src/database/seeds/seed-failure.ts` (the seed's catch paths, unit-tested).
+    `src/database/seeds/report-seed-error.ts` (the seed's catch paths, unit-tested).
   - `test/setup/test-env.ts`: pin `LOG_LEVEL=log` for e2e runs.
   - `test/logging.e2e-spec.ts` (Supertest, test-only throwing controller).
   - Docs: one line in `docs/adrs/sensitive-data.md`, README section on `LOG_LEVEL` and the JSON
@@ -253,9 +253,9 @@ None that contradict ADR text. Two notes:
 10. `src/main.ts`: `NestFactory.create(AppModule, { bufferLogs: true })`, then immediately
     `app.useLogger(app.get(AppLogger))` before anything else logs. Startup lines then come out as
     JSON once the logger is attached.
-11. `src/database/seeds/seed-failure.ts` + `src/database/seeds/seed-failure.spec.ts` +
+11. `src/database/seeds/report-seed-error.ts` + `src/database/seeds/report-seed-error.spec.ts` +
     `src/database/seeds/seed.module.ts` + `src/database/seeds/seed.ts`:
-    - `seed-failure.ts` (new) exports the two catch paths so they can be unit-tested.
+    - `report-seed-error.ts` (new) exports the two catch paths so they can be unit-tested.
       `const SEED_CONTEXT = 'Seed'`.
       - `export function logSeedFailure(logger: LoggerService, error: unknown): void`, which
         branches the same way as the filter:
@@ -414,7 +414,7 @@ None that contradict ADR text. Two notes:
     of every logger call contains neither `'Bearer fake'`, the body password nor the query.
 - Unit, `src/logging/logging.module.spec.ts`: `AppLogger` resolves; `LOG_TRANSPORTS` is an
   array containing one `ConsoleTransport`.
-- Unit, `src/database/seeds/seed-failure.spec.ts`. `logSeedFailure` gets a recording fake
+- Unit, `src/database/seeds/report-seed-error.spec.ts`. `logSeedFailure` gets a recording fake
   `LoggerService`. `writeSeedFailureWithoutContext` is tested with spies on
   `process.stderr.write`/`process.stdout.write`, restored in `afterEach`.
   - `logSeedFailure(fake, err)` with an `Error` → exactly one call,
@@ -463,7 +463,7 @@ None that contradict ADR text. Two notes:
 |----|-------|-------------------|------------|
 | A  | 1, 2, 3, 4, 5 | src/logging/log-entry.ts, src/config/env.validation.ts, src/config/env.validation.spec.ts, src/logging/log-transport.ts, src/logging/console.transport.ts, src/logging/console.transport.spec.ts, src/logging/log-sanitizer.ts, src/logging/log-sanitizer.spec.ts | — |
 | B  | 6, 7, 8 | src/logging/app-logger.service.ts, src/logging/app-logger.service.spec.ts, src/logging/all-exceptions.filter.ts, src/logging/all-exceptions.filter.spec.ts, src/logging/logging.module.ts, src/logging/logging.module.spec.ts | A |
-| Z  | 9, 10, 11, 12, 12a, 13, 14 | src/app.module.ts, src/main.ts, src/database/seeds/seed-failure.ts, src/database/seeds/seed-failure.spec.ts, src/database/seeds/seed.ts, src/database/seeds/seed.module.ts, test/logging.e2e-spec.ts, test/setup/test-env.ts, docs/adrs/sensitive-data.md, README.md | A, B |
+| Z  | 9, 10, 11, 12, 12a, 13, 14 | src/app.module.ts, src/main.ts, src/database/seeds/report-seed-error.ts, src/database/seeds/report-seed-error.spec.ts, src/database/seeds/seed.ts, src/database/seeds/seed.module.ts, test/logging.e2e-spec.ts, test/setup/test-env.ts, docs/adrs/sensitive-data.md, README.md | A, B |
 
 `.env.example` belongs to no package (see Risks). `src/database/seeds/seed.service.ts` is not
 changed.
@@ -582,13 +582,13 @@ changed.
   - Blocker: the seed passed whatever it caught to `AppLogger.error`. A thrown object would have
     been merged into `meta` with `parameters`/`query`/`detail` intact, and a thrown string could
     be taken as a stack. Step 11 now moves the catch logic into the new
-    `src/database/seeds/seed-failure.ts`, which has two functions:
+    `src/database/seeds/report-seed-error.ts`, which has two functions:
     - `logSeedFailure(logger, error)` logs an `Error` as `error('Seed failed', error, 'Seed')`,
       and anything else as `error('Seed failed (non-error value thrown)', 'Seed')`, with nothing
       from the value.
     - `writeSeedFailureWithoutContext(error)` is the pre-context `writeLogLine` fallback and uses
       the same branching.
-    - Unit tests are in `src/database/seeds/seed-failure.spec.ts`, including thrown
+    - Unit tests are in `src/database/seeds/report-seed-error.spec.ts`, including thrown
       `{ parameters: ['fake-hash'] }` and `'fake-secret-string'` through both a fake logger and
       the real `AppLogger`.
     - Both new files are in package Z.

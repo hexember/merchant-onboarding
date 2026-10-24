@@ -2,7 +2,7 @@
 import { INestApplicationContext, LoggerService } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppLogger } from '../../logging/app-logger.service';
-import { logSeedFailure, writeSeedFailureWithoutContext } from './seed-failure';
+import { logSeedFailure, writeSeedFailureWithoutContext } from './report-seed-error';
 import { SeedModule } from './seed.module';
 import { SeedService } from './seed.service';
 
