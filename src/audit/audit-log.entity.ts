@@ -1,5 +1,5 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
-import { UserRole } from '../common/user-role.enum';
+import { UserRole } from '../common/common.enums';
 import { AuditAction, AuditActorType } from './audit.enums';
 
 // Append-only audit trail (docs/adrs/database.md §`audit_logs`). Rows are only ever inserted,

@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
-import { UserRole } from '../../common/user-role.enum';
+import { UserRole } from '../../common/common.enums';
 import { UsersRepository } from '../../users/users.repository';
 
 export interface SeedUser {

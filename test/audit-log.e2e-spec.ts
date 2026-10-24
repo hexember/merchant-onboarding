@@ -4,7 +4,7 @@ import { AppModule } from '../src/app.module';
 import { AuditAction, AuditActorType } from '../src/audit/audit.enums';
 import { AuditEntry, AuditLogService } from '../src/audit/audit-log.service';
 import { REDACTED } from '../src/common/redact';
-import { UserRole } from '../src/common/user-role.enum';
+import { UserRole } from '../src/common/common.enums';
 import { resetTables } from './utils/test-db';
 
 const USER_ID = '00000000-0000-0000-0000-000000000001';

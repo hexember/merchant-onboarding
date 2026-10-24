@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
-import { UserRole } from '../src/common/user-role.enum';
+import { UserRole } from '../src/common/common.enums';
 import { UsersRepository } from '../src/users/users.repository';
 import { resetTables } from './utils/test-db';
 

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager, QueryDeepPartialEntity } from 'typeorm';
 import { maskSensitiveFields } from '../common/mask';
 import { isPlainObject, redact } from '../common/redact';
-import { UserRole } from '../common/user-role.enum';
+import { UserRole } from '../common/common.enums';
 import { AuditAction, AuditActorType } from './audit.enums';
 import { AuditLog } from './audit-log.entity';
 

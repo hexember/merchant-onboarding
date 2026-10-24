@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { UserRole } from '../common/user-role.enum';
+import { UserRole } from '../common/common.enums';
 import { normalizeEmail } from './normalize-email';
 import { User } from './user.entity';
 

@@ -7,7 +7,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { UserRole } from '../common/user-role.enum';
+import { UserRole } from '../common/common.enums';
 import { normalizeEmail } from './normalize-email';
 
 // Schema: docs/adrs/database.md §users. Only seeded fake users exist.

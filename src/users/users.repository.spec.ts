@@ -1,5 +1,5 @@
 import { Repository } from 'typeorm';
-import { UserRole } from '../common/user-role.enum';
+import { UserRole } from '../common/common.enums';
 import { User } from './user.entity';
 import { UsersRepository } from './users.repository';
 
