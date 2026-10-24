@@ -2,8 +2,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { MASK } from '../common/mask';
 import { REDACTED } from '../common/redact';
 import { UserRole } from '../common/user-role.enum';
-import { AuditAction } from './audit-action.enum';
-import { AuditActorType } from './audit-actor-type.enum';
+import { AuditAction, AuditActorType } from './audit.enums';
 import { AuditLog } from './audit-log.entity';
 import { User } from '../users/user.entity';
 import {

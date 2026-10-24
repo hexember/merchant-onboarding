@@ -1,7 +1,6 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 import { UserRole } from '../common/user-role.enum';
-import { AuditAction } from './audit-action.enum';
-import { AuditActorType } from './audit-actor-type.enum';
+import { AuditAction, AuditActorType } from './audit.enums';
 
 // Append-only audit trail (docs/adrs/database.md §`audit_logs`). Rows are only ever inserted,
 // through AuditLogService; a database trigger rejects UPDATE and DELETE.

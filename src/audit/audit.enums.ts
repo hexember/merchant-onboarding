@@ -1,3 +1,9 @@
+// Who performed an audited action: a logged-in user or a system component.
+export enum AuditActorType {
+  USER = 'USER',
+  SYSTEM = 'SYSTEM',
+}
+
 // Every action that writes an audit row (docs/adrs/database.md §`audit_logs`).
 export enum AuditAction {
   APPLICATION_CREATED = 'APPLICATION_CREATED',

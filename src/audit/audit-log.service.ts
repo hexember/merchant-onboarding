@@ -3,8 +3,7 @@ import { DataSource, EntityManager, QueryDeepPartialEntity } from 'typeorm';
 import { maskSensitiveFields } from '../common/mask';
 import { isPlainObject, redact } from '../common/redact';
 import { UserRole } from '../common/user-role.enum';
-import { AuditAction } from './audit-action.enum';
-import { AuditActorType } from './audit-actor-type.enum';
+import { AuditAction, AuditActorType } from './audit.enums';
 import { AuditLog } from './audit-log.entity';
 
 // Largest `meta` kept as-is, in bytes of UTF-8 JSON (docs/adrs/database.md §`meta` columns).

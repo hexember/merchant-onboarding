@@ -1,8 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
-import { AuditAction } from '../src/audit/audit-action.enum';
-import { AuditActorType } from '../src/audit/audit-actor-type.enum';
+import { AuditAction, AuditActorType } from '../src/audit/audit.enums';
 import { AuditEntry, AuditLogService } from '../src/audit/audit-log.service';
 import { REDACTED } from '../src/common/redact';
 import { UserRole } from '../src/common/user-role.enum';
