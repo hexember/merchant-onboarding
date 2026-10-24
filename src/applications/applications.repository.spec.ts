@@ -324,4 +324,140 @@ describe('ApplicationsRepository', () => {
       ).resolves.toBe(false);
     });
   });
+
+  describe('submitIfAllowed', () => {
+    function setupSubmit(affected: number | undefined): {
+      manager: EntityManager;
+      updateQb: Record<'update' | 'set' | 'where' | 'andWhere' | 'execute', jest.Mock>;
+    } {
+      const updateQb = {
+        update: jest.fn(),
+        set: jest.fn(),
+        where: jest.fn(),
+        andWhere: jest.fn(),
+        execute: jest.fn().mockResolvedValue({ affected, raw: [], generatedMaps: [] }),
+      };
+      updateQb.update.mockReturnValue(updateQb);
+      updateQb.set.mockReturnValue(updateQb);
+      updateQb.where.mockReturnValue(updateQb);
+      updateQb.andWhere.mockReturnValue(updateQb);
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(updateQb),
+      } as unknown as EntityManager;
+      return { manager, updateQb };
+    }
+
+    const VERSION_AND_SUBMITTABLE = [
+      ['version = :expectedVersion', { expectedVersion: 4 }],
+      [
+        'status IN (:...submittableStatuses)',
+        { submittableStatuses: [ApplicationStatus.DRAFT, ApplicationStatus.INFO_REQUESTED] },
+      ],
+    ];
+
+    function onlySetArg(updateQb: { set: jest.Mock }): Record<string, unknown> {
+      expect(updateQb.set).toHaveBeenCalledTimes(1);
+      const [setArg] = updateQb.set.mock.calls[0] as [Record<string, unknown>];
+      return setArg;
+    }
+
+    function raw(value: unknown): string {
+      expect(typeof value).toBe('function');
+      return (value as () => string)();
+    }
+
+    it('sets the status, resets KYB, bumps counters, and checks version, status and scope', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupSubmit(1);
+
+      await expect(
+        repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, SALES, manager),
+      ).resolves.toBe(true);
+
+      expect(updateQb.update).toHaveBeenCalledWith(MerchantApplication);
+      const setArg = onlySetArg(updateQb);
+      expect(Object.keys(setArg).sort()).toEqual(
+        [
+          'status',
+          'kybStatus',
+          'kybLevel',
+          'kybScore',
+          'kybAttempts',
+          'kybLastAttemptAt',
+          'submissionCount',
+          'submittedAt',
+          'version',
+          'updatedAt',
+        ].sort(),
+      );
+      expect(setArg['status']).toBe(ApplicationStatus.RISK_REVIEW);
+      expect(setArg['kybStatus']).toBe(KybStatus.PENDING);
+      expect(setArg['kybLevel']).toBeNull();
+      expect(setArg['kybScore']).toBeNull();
+      expect(setArg['kybLastAttemptAt']).toBeNull();
+      expect(setArg['kybAttempts']).toBe(0);
+      expect(raw(setArg['submissionCount'])).toBe('submission_count + 1');
+      expect(raw(setArg['submittedAt'])).toBe('now()');
+      expect(raw(setArg['version'])).toBe('version + 1');
+      expect(raw(setArg['updatedAt'])).toBe('now()');
+      expect(updateQb.where).toHaveBeenCalledWith('id = :id', { id: APP_ID });
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_SUBMITTABLE,
+        ['sales_owner_id = :actorId', { actorId: SALES_ID }],
+      ]);
+    });
+
+    it('never touches ownership, assignment or decision columns', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupSubmit(1);
+
+      await repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, ADMIN, manager);
+
+      const keys = Object.keys(onlySetArg(updateQb));
+      for (const forbidden of ['salesOwnerId', 'assignedReviewerId', 'decisionNote', 'decidedAt']) {
+        expect(keys).not.toContain(forbidden);
+      }
+    });
+
+    it('REVIEWER: repeats the scope as assigned_reviewer_id = actor id', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupSubmit(1);
+
+      await repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, REVIEWER, manager);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([
+        ...VERSION_AND_SUBMITTABLE,
+        ['assigned_reviewer_id = :actorId', { actorId: REVIEWER_ID }],
+      ]);
+    });
+
+    it('ADMIN: adds no scope condition', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupSubmit(1);
+
+      await repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, ADMIN, manager);
+
+      expect(updateQb.andWhere.mock.calls).toEqual(VERSION_AND_SUBMITTABLE);
+    });
+
+    it('unknown role: fails closed with 1 = 0 and returns false', async () => {
+      const { repository } = setup();
+      const { manager, updateQb } = setupSubmit(0);
+
+      await expect(
+        repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, UNKNOWN_ROLE, manager),
+      ).resolves.toBe(false);
+
+      expect(updateQb.andWhere.mock.calls).toEqual([...VERSION_AND_SUBMITTABLE, ['1 = 0']]);
+    });
+
+    it.each([0, undefined])('returns false when affected is %s', async (affected) => {
+      const { repository } = setup();
+      const { manager } = setupSubmit(affected);
+
+      await expect(
+        repository.submitIfAllowed(APP_ID, 4, ApplicationStatus.RISK_REVIEW, SALES, manager),
+      ).resolves.toBe(false);
+    });
+  });
 });

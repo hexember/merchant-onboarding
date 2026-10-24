@@ -18,6 +18,7 @@ import {
   CONCURRENT_MODIFICATION_CODE,
   INVALID_STATE_TRANSITION_CODE,
   NO_FIELDS_TO_UPDATE_MESSAGE,
+  NOT_SUBMITTABLE_MESSAGE,
   SALES_OWNER_NOT_SALES_MESSAGE,
   SALES_OWNER_REQUIRED_MESSAGE,
 } from './applications.service';
@@ -84,6 +85,7 @@ function fakeApplication(overrides: Partial<MerchantApplication> = {}): Merchant
     kybStatus: KybStatus.NOT_STARTED,
     kybLevel: null,
     kybScore: null,
+    submissionCount: 0,
     version: 1,
     meta: {},
     createdAt: new Date('2026-01-01T00:00:00Z'),
@@ -100,6 +102,7 @@ interface Mocks {
   findAccessible: jest.Mock;
   findAccessiblePage: jest.Mock;
   updateIfEditable: jest.Mock;
+  submitIfAllowed: jest.Mock;
   existsWithRole: jest.Mock;
   record: jest.Mock;
 }
@@ -111,6 +114,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
   const findAccessible = jest.fn().mockResolvedValue(found);
   const findAccessiblePage = jest.fn().mockResolvedValue({ items: [], total: 0 });
   const updateIfEditable = jest.fn().mockResolvedValue(true);
+  const submitIfAllowed = jest.fn().mockResolvedValue(true);
   const existsWithRole = jest.fn().mockResolvedValue(true);
   const record = jest.fn().mockResolvedValue(undefined);
   const service = new ApplicationsService(
@@ -120,6 +124,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
       findAccessible,
       findAccessiblePage,
       updateIfEditable,
+      submitIfAllowed,
     } as unknown as ApplicationsRepository,
     { existsWithRole } as unknown as UsersRepository,
     { record } as unknown as AuditLogService,
@@ -132,6 +137,7 @@ function setup(found: MerchantApplication | null = fakeApplication()): Mocks {
     findAccessible,
     findAccessiblePage,
     updateIfEditable,
+    submitIfAllowed,
     existsWithRole,
     record,
   };
@@ -472,6 +478,131 @@ describe('ApplicationsService', () => {
       await expect(
         service.update(APP_ID, updateDto({ businessName: 'Example Bakery' }), ADMIN),
       ).rejects.toThrow('audit write failed');
+    });
+  });
+
+  describe('submit (denied)', () => {
+    it('REVIEWER → 403 before any DB work', async () => {
+      const { service, transaction, findAccessible, submitIfAllowed, record } = setup();
+
+      await expect(service.submit(APP_ID, REVIEWER)).rejects.toBeInstanceOf(ForbiddenException);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(findAccessible).not.toHaveBeenCalled();
+      expect(submitIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('out of scope or unknown → 404 with no write or audit', async () => {
+      const { service, submitIfAllowed, record } = setup(null);
+
+      const error = await service.submit(APP_ID, SALES).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(NotFoundException);
+      expect((error as NotFoundException).message).toBe(APPLICATION_NOT_FOUND_MESSAGE);
+      expect(submitIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ApplicationStatus.RISK_REVIEW,
+      ApplicationStatus.UNDER_REVIEW,
+      ApplicationStatus.APPROVED,
+      ApplicationStatus.REJECTED,
+    ])('%s → 409 INVALID_STATE_TRANSITION with no write or audit', async (status) => {
+      const { service, submitIfAllowed, record } = setup(fakeApplication({ status }));
+
+      const error = await service.submit(APP_ID, SALES).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual({
+        statusCode: 409,
+        error: 'Conflict',
+        message: NOT_SUBMITTABLE_MESSAGE,
+        code: 'INVALID_STATE_TRANSITION',
+      });
+      expect(submitIfAllowed).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+    });
+
+    it('lost race (submitIfAllowed → false) → 409 CONCURRENT_MODIFICATION, no audit, no re-read', async () => {
+      const { service, findAccessible, submitIfAllowed, record } = setup();
+      submitIfAllowed.mockResolvedValue(false);
+
+      const error = await service.submit(APP_ID, SALES).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        statusCode: 409,
+        error: 'Conflict',
+        code: 'CONCURRENT_MODIFICATION',
+      });
+      expect(record).not.toHaveBeenCalled();
+      expect(findAccessible).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('submit (allowed)', () => {
+    it.each([
+      [ApplicationStatus.DRAFT, SALES],
+      [ApplicationStatus.DRAFT, ADMIN],
+      [ApplicationStatus.INFO_REQUESTED, SALES],
+      [ApplicationStatus.INFO_REQUESTED, ADMIN],
+    ])('%s by %o → RISK_REVIEW, audited with the read-back submissionNo', async (status, actor) => {
+      const { service, findAccessible, submitIfAllowed, record, manager } = setup();
+      findAccessible
+        .mockResolvedValueOnce(fakeApplication({ status, version: 5, submissionCount: 2 }))
+        .mockResolvedValueOnce(
+          fakeApplication({
+            status: ApplicationStatus.RISK_REVIEW,
+            kybStatus: KybStatus.PENDING,
+            version: 6,
+            submissionCount: 3,
+          }),
+        );
+
+      const response = await service.submit(APP_ID, actor);
+
+      expect(findAccessible).toHaveBeenNthCalledWith(1, APP_ID, actor, manager);
+      expect(submitIfAllowed).toHaveBeenCalledWith(
+        APP_ID,
+        5,
+        ApplicationStatus.RISK_REVIEW,
+        actor,
+        manager,
+      );
+      expect(findAccessible).toHaveBeenCalledTimes(2);
+      expect(findAccessible).toHaveBeenNthCalledWith(2, APP_ID, actor, manager);
+      const entry = onlyAuditEntry(record);
+      expect(entry).toEqual({
+        actorType: AuditActorType.USER,
+        actorId: actor.id,
+        actorRole: actor.role,
+        action: AuditAction.APPLICATION_SUBMITTED,
+        entityType: 'merchant_application',
+        entityId: APP_ID,
+        meta: { from: status, to: ApplicationStatus.RISK_REVIEW, submissionNo: 3 },
+      });
+      expect(Object.keys(entry.meta ?? {}).sort()).toEqual(['from', 'submissionNo', 'to']);
+      expect((record.mock.calls[0] as unknown[])[1]).toBe(manager);
+      expect(response.status).toBe(ApplicationStatus.RISK_REVIEW);
+      expect(response.taxId).toBe('••••••1234');
+      expect(response).not.toHaveProperty('meta');
+      expect(response).not.toHaveProperty('version');
+      expect(response).not.toHaveProperty('submissionCount');
+    });
+
+    it('rejects when the audit write fails', async () => {
+      const { service, record } = setup();
+      record.mockRejectedValue(new Error('audit write failed'));
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toThrow('audit write failed');
+    });
+
+    it('throws inside the transaction when the re-read finds nothing', async () => {
+      const { service, findAccessible, record } = setup();
+      findAccessible.mockResolvedValueOnce(fakeApplication()).mockResolvedValueOnce(null);
+
+      await expect(service.submit(APP_ID, SALES)).rejects.toThrow(
+        'Application written in this transaction could not be re-read',
+      );
+      expect(record).not.toHaveBeenCalled();
     });
   });
 });

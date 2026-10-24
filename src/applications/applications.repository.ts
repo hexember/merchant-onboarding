@@ -4,8 +4,13 @@ import { isUUID } from 'class-validator';
 import { EntityManager, Repository, SelectQueryBuilder, WhereExpressionBuilder } from 'typeorm';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
-import { ApplicationStatus } from './application.enums';
-import { EDITABLE_STATUSES } from './application-status';
+import { ApplicationStatus, KybStatus } from './application.enums';
+import {
+  allowedStatuses,
+  ApplicationOperation,
+  fromStatuses,
+  TransitionAction,
+} from './application-state-machine';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
 
@@ -55,10 +60,11 @@ export interface ApplicationPage {
  * all rows, and any other role nothing. Out of scope and unknown ids both come back as `null`, so
  * the caller answers 404 for both. There is deliberately no unscoped find-by-id.
  *
- * `updateIfEditable` is the only update. It must only be called with an id that `findAccessible`
- * returned in the same transaction; its `version` condition then guarantees the row is still the
- * one that passed the scope check. As defence in depth it also repeats the actor's scope, built by
- * the same `applyScope` as the reads, so the read and write rules cannot drift apart.
+ * There are two conditional updates: `updateIfEditable` (PATCH) and `submitIfAllowed` (SUBMIT).
+ * Each must only be called with an id that `findAccessible` returned in the same transaction; its
+ * `version` condition then guarantees the row is still the one that passed the scope check. Both
+ * bump `version`, and as defence in depth both repeat the actor's scope, built by the same
+ * `applyScope` as the reads, so the read and write rules cannot drift apart.
  *
  * Every write to an ownership or assignment column (`sales_owner_id`, `assigned_reviewer_id`)
  * must bump `version`, so a concurrent update's `version` condition sees the change.
@@ -135,7 +141,49 @@ export class ApplicationsRepository {
       .set({ ...changes, version: () => 'version + 1', updatedAt: () => 'now()' })
       .where('id = :id', { id })
       .andWhere('version = :expectedVersion', { expectedVersion })
-      .andWhere('status IN (:...editableStatuses)', { editableStatuses: [...EDITABLE_STATUSES] });
+      .andWhere('status IN (:...editableStatuses)', {
+        editableStatuses: [...allowedStatuses(ApplicationOperation.UPDATE)],
+      });
+    // The UPDATE has no alias, so the scope uses bare column names.
+    const result = await this.applyScope(query, actor, '').execute();
+    return result.affected === 1;
+  }
+
+  /**
+   * The single SUBMIT write (docs/adrs/kyb-check.md): moves the row to `to`, resets the KYB result
+   * (`kyb_status = PENDING`, level/score/last attempt cleared, attempts 0), increments
+   * `submission_count`, stamps `submitted_at` and bumps `version`. Applies only if the row still
+   * has `expectedVersion` and a status SUBMIT may start from, and repeats the actor's scope.
+   * Returns false when no row matched (changed concurrently). It never touches the ownership or
+   * assignment columns. Only call it with an id `findAccessible` returned in the same transaction.
+   */
+  async submitIfAllowed(
+    id: string,
+    expectedVersion: number,
+    to: ApplicationStatus,
+    actor: AuthUser,
+    manager: EntityManager,
+  ): Promise<boolean> {
+    const query = manager
+      .createQueryBuilder()
+      .update(MerchantApplication)
+      .set({
+        status: to,
+        kybStatus: KybStatus.PENDING,
+        kybLevel: null,
+        kybScore: null,
+        kybAttempts: 0,
+        kybLastAttemptAt: null,
+        submissionCount: () => 'submission_count + 1',
+        submittedAt: () => 'now()',
+        version: () => 'version + 1',
+        updatedAt: () => 'now()',
+      })
+      .where('id = :id', { id })
+      .andWhere('version = :expectedVersion', { expectedVersion })
+      .andWhere('status IN (:...submittableStatuses)', {
+        submittableStatuses: [...fromStatuses(TransitionAction.SUBMIT)],
+      });
     // The UPDATE has no alias, so the scope uses bare column names.
     const result = await this.applyScope(query, actor, '').execute();
     return result.affected === 1;
@@ -153,7 +201,7 @@ export class ApplicationsRepository {
 
   /**
    * Adds the actor's scope to `query`: the single source of the scope rules for both the reads and
-   * the update. `columnPrefix` is `'app.'` for the aliased reads and `''` for the unaliased UPDATE.
+   * the updates. `columnPrefix` is `'app.'` for the aliased reads and `''` for the unaliased UPDATE.
    */
   private applyScope<Q extends WhereExpressionBuilder>(
     query: Q,
