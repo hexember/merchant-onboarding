@@ -2,7 +2,12 @@
 
 - `POST /auth/login` returns `{ accessToken, expiresIn }`. JWTs are HS256, signed with a secret from
   env, expire after 1h, and carry the claims `{ sub, role }`.
-- _(trade-off)_ There are no refresh tokens or revocation list. For a production system I'd add
+- The JWT guard re-reads the caller's `id` and `role` from `users` on each authenticated request
+  (one primary-key lookup, auth-only). A deleted user gets 401 and a role change takes effect on
+  the next request; the role used for authorization comes from the database, not the token.
+- `@Roles(...)` applies even on a route marked `@Public()` (no user → 401, wrong role → 403).
+- _(trade-off)_ Apart from that per-request user check, tokens are not revocable: there are no
+  refresh tokens or revocation list. For a production system I'd add
   short-lived access tokens, rotating refresh tokens and a token version on the user.
 - Login failures return a generic `401 Invalid credentials` (this prevents user enumeration).
   bcrypt `compare` runs even when the user doesn't exist, which keeps response timing similar.

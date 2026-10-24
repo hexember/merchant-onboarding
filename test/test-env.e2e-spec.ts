@@ -1,4 +1,4 @@
-import { resolveTestDatabaseEnv } from './setup/test-env';
+import { ensureTestJwtSecret, resolveTestDatabaseEnv } from './setup/test-env';
 
 // Pure guard tests (no database). The harness drops DB_NAME_TEST, so these prove it refuses
 // anything that is not clearly a separate, local test database.
@@ -109,5 +109,33 @@ describe('resolveTestDatabaseEnv', () => {
         }),
       ).not.toThrow();
     });
+  });
+});
+
+// Pure tests with an injected generator, so no real randomness decides an assertion.
+describe('ensureTestJwtSecret', () => {
+  const GENERATED = 'fixture-generated-secret';
+
+  it('keeps an existing value and does not call the generator', () => {
+    const generate = jest.fn(() => GENERATED);
+
+    expect(ensureTestJwtSecret({ JWT_SECRET: 'fixture-existing-secret' }, generate)).toBe(
+      'fixture-existing-secret',
+    );
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('returns the generator output when JWT_SECRET is unset', () => {
+    const generate = jest.fn(() => GENERATED);
+
+    expect(ensureTestJwtSecret({}, generate)).toBe(GENERATED);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the generator output when JWT_SECRET is empty', () => {
+    const generate = jest.fn(() => GENERATED);
+
+    expect(ensureTestJwtSecret({ JWT_SECRET: '' }, generate)).toBe(GENERATED);
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 });

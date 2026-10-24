@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { isUUID } from 'class-validator';
 import { Repository } from 'typeorm';
 import { UserRole } from '../common/common.enums';
 import { normalizeEmail } from './normalize-email';
@@ -12,8 +13,11 @@ export interface NewUser {
   passwordHash: string;
 }
 
-// Only the lookups the seed needs. There is deliberately no find-by-id; later tasks add
-// what they need.
+/** The only user fields the auth guard needs on each request. */
+export type AuthUserRow = Pick<User, 'id' | 'role'>;
+
+// Only the lookups the seed and auth need. There is still no general find-by-id: the only id
+// lookup is `findAuthUserById`, which is auth-only. Later tasks add what they need.
 @Injectable()
 export class UsersRepository {
   constructor(@InjectRepository(User) private readonly repository: Repository<User>) {}
@@ -21,6 +25,38 @@ export class UsersRepository {
   /** Looks a user up by email (normalised first). `passwordHash` is not selected. */
   findByEmail(email: string): Promise<User | null> {
     return this.repository.findOne({ where: { email: normalizeEmail(email) } });
+  }
+
+  /**
+   * Looks a user up by email (normalised first) and also selects `passwordHash`, which is
+   * `select: false` everywhere else. For login only: never return its result from an endpoint.
+   */
+  findByEmailWithPasswordHash(email: string): Promise<User | null> {
+    return this.repository
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.email = :email', { email: normalizeEmail(email) })
+      .getOne();
+  }
+
+  /**
+   * AUTH ONLY: re-reads the caller's own user row by the token's `sub`, selecting only `id` and
+   * `role` (primary-key lookup). `JwtAuthGuard` calls it on every authenticated request so that a
+   * deleted user or a changed role takes effect immediately. It is not an application lookup:
+   * never use it to load another user for a request, and never return its result from an
+   * endpoint. Returns null when no row matches, or when `id` is not a UUID (Postgres would
+   * otherwise reject the query with an error).
+   */
+  async findAuthUserById(id: string): Promise<AuthUserRow | null> {
+    if (!isUUID(id)) {
+      return null;
+    }
+    const row = await this.repository
+      .createQueryBuilder('user')
+      .select(['user.id', 'user.role'])
+      .where('user.id = :id', { id })
+      .getOne();
+    return row === null ? null : { id: row.id, role: row.role };
   }
 
   /**

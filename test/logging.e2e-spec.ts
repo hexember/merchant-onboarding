@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import * as request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
+import { Public } from '../src/auth/decorators/public.decorator';
 import { AppLogger } from '../src/logging/app-logger.service';
 
 // Fake fixture values only; none of them is a real credential.
@@ -23,6 +25,8 @@ const GENERIC_500_BODY = {
 };
 
 // Test-only controller; it exists only inside this spec and reaches no application data.
+// Public, so the global JwtAuthGuard does not turn the 500/404/400 cases into 401.
+@Public()
 @Controller('logging-e2e-test')
 class ThrowingController {
   @Get('boom')
@@ -200,6 +204,10 @@ describe('Startup failure output (spawned process)', () => {
   const DIST = join(__dirname, '..', 'dist');
   let cwd: string;
 
+  // Generated once at runtime so JWT_SECRET is valid and DB_PASSWORD stays the only invalid
+  // variable. It never decides an assertion: the child exits on env validation before using it.
+  const jwtSecret = randomBytes(32).toString('hex');
+
   // Fake values only. DB_PASSWORD is missing on purpose, so env validation fails before any
   // connection is attempted.
   const INVALID_ENV: Record<string, string> = {
@@ -211,6 +219,7 @@ describe('Startup failure output (spawned process)', () => {
     DB_PORT: '1',
     DB_USER: 'fake_user',
     DB_NAME: 'fake_db',
+    JWT_SECRET: jwtSecret,
   };
 
   beforeAll(() => {
