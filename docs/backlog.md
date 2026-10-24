@@ -31,7 +31,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   actions); `POST /applications/:id/submit` from `DRAFT` / `INFO_REQUESTED` to `RISK_REVIEW` in one
   transaction (`kybStatus=PENDING`, cleared KYB fields, `submission_count` + 1, audit row);
   optimistic concurrency; anything else → 409 `INVALID_STATE_TRANSITION`. No queue yet.
-- [ ] **kyb-worker** — `kyb_checks` table, BullMQ + Redis wiring, injectable `KybProvider` with a
+- [x] **kyb-worker** — branch `ai/kyb-worker-20261024-1719`, PR https://github.com/hexember/merchant-onboarding/pull/10 — `kyb_checks` table, BullMQ + Redis wiring, injectable `KybProvider` with a
   simulated provider and a deterministic fake for tests, enqueue after commit with
   `jobId = kyb-check:{id}:{n}`, the idempotent worker from docs/adrs/kyb-check.md (stale check,
   unique row, conditional update, retries, final failure → `UNDER_REVIEW` + `FAILED`), and the
@@ -54,6 +54,18 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- `.env` / `.env.example` (kyb-worker, #10): `REDIS_HOST` is now required (app, `migration:*`,
+  `seed`, `test:e2e`) — add `REDIS_HOST=localhost` and `REDIS_PORT=6379` to `.env` if missing, and
+  run Redis (`docker compose up -d redis`) for e2e. Add to `.env.example`: `QUEUE_PREFIX=bull`,
+  `KYB_WORKER_ENABLED=true`, `KYB_FAILURE_RATE=0.2`, `KYB_SCORE_MEDIUM_MIN=40`,
+  `KYB_SCORE_HIGH_MIN=70` (comments in the PR body).
+- Defaults taken in kyb-worker (#10): worker writes bump `version`; final failure writes both
+  ATTEMPT_FAILED (`final: true`) and KYB_CHECK_FAILED; job retention 7 days (completed) / 30 days
+  (failed); invented simulated scoring; thresholds 40/70; failure rate 0.2.
+- Production readiness (candidate): Redis auth/TLS (`REDIS_PASSWORD`) and an outbox or sweeper for
+  applications left in `RISK_REVIEW` (Redis down at enqueue, stalled jobs). Both are documented
+  trade-offs, not built.
 
 - **Decision coming in reviewer-decision:** docs/adrs/workflow.md §1.2 gives APPROVE the guard
   `kybStatus = COMPLETED` (and testing.md expects 409 for approving with `kybStatus=FAILED`), but
