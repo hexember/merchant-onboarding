@@ -16,8 +16,10 @@ export interface NewUser {
 /** The only user fields the auth guard needs on each request. */
 export type AuthUserRow = Pick<User, 'id' | 'role'>;
 
-// Only the lookups the seed and auth need. There is still no general find-by-id: the only id
-// lookup is `findAuthUserById`, which is auth-only. Later tasks add what they need.
+// Only the lookups the seed, auth and the target-role check need: email lookups for the seed and
+// login, `findAuthUserById` for the auth guard, and `existsWithRole` for checking the role of a
+// target user an ADMIN names. There is still no general find-by-id: neither id lookup returns
+// another user's data to a caller. Later tasks add what they need.
 @Injectable()
 export class UsersRepository {
   constructor(@InjectRepository(User) private readonly repository: Repository<User>) {}
@@ -57,6 +59,19 @@ export class UsersRepository {
       .where('user.id = :id', { id })
       .getOne();
     return row === null ? null : { id: row.id, role: row.role };
+  }
+
+  /**
+   * Target-role check: true when a user with this id has this role. Used for an ADMIN's
+   * `salesOwnerId` on create (later also transfer/assign). Selects nothing sensitive and never
+   * returns user data to a caller. Returns false without querying when `id` is not a UUID
+   * (Postgres would otherwise reject the query with an error).
+   */
+  existsWithRole(id: string, role: UserRole): Promise<boolean> {
+    if (!isUUID(id)) {
+      return Promise.resolve(false);
+    }
+    return this.repository.exists({ where: { id, role } });
   }
 
   /**

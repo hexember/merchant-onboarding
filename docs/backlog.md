@@ -19,7 +19,7 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
   `@Public()` opt-out, a `@Roles()` guard (403 for the wrong role), a current-user decorator, and
   Swagger decorators. Tests: login success and failure, no token and tampered token → 401, wrong
   role → 403, using a test-only protected route.
-- [ ] **applications-crud** — `merchant_applications` table and migration per
+- [x] **applications-crud** — branch `ai/applications-crud-20261024-1624`, PR https://github.com/hexember/merchant-onboarding/pull/8 — `merchant_applications` table and migration per
   docs/adrs/database.md; `POST /applications`, `GET /applications?status&page&limit`,
   `GET /applications/:id`, `PATCH /applications/:id` per the auth matrix, with every lookup
   through `findAccessible(id, actor)` (out of scope or unknown → 404). Responses mask `taxId`,
@@ -54,6 +54,14 @@ Markers: `- [ ]` to do · `- [x]` shipped (PR open or merged) · `- [!]` stopped
 
 Questions, decisions taken by default, and manual steps (such as `.env.example` lines) that the
 loop could not do itself. Newest first.
+
+- Defaults taken in applications-crud (#8): every NOT NULL column required on create; KYB fields,
+  `version` and `meta` left out of responses; list `{ items, page, limit, total }` (limit 20, max
+  100, page max 10 000); empty PATCH → 400; `ownerFullName` returned unmasked (not in the ADR's
+  mask list); taxId / ownerNationalId at least 8 chars; lost PATCH race → 409
+  `CONCURRENT_MODIFICATION`; SALES sending `salesOwnerId` with any value → 403.
+- Follow-up (small): the old real-format phone fixture `+977-9800000123` is still in
+  `src/common/mask.ts`, `src/common/mask.spec.ts` and `docs/plans/database-foundation.md`.
 
 - **Decision (auth-login, #7):** `main` has no global exception filter any more, so error bodies
   are Nest's defaults (no `code`, 5xx not made generic). That no longer matches

@@ -1,4 +1,5 @@
 import { DataSourceOptions } from 'typeorm';
+import { MerchantApplication } from '../applications/merchant-application.entity';
 import { AuditLog } from '../audit/audit-log.entity';
 import { AppEnv } from '../config/env.validation';
 import { User } from '../users/user.entity';
@@ -20,7 +21,7 @@ export function createDataSourceOptions(env: DatabaseEnv): DataSourceOptions {
     username: env.DB_USER,
     password: env.DB_PASSWORD,
     database: env.DB_NAME,
-    entities: [User, AuditLog],
+    entities: [User, AuditLog, MerchantApplication],
     migrations,
     synchronize: false,
     migrationsRun: false,
