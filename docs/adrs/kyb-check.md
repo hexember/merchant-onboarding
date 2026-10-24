@@ -32,7 +32,7 @@ status change.
 **trade-off** The service enqueues after the commit, not through a transactional outbox. If Redis
 is down at that moment, the application stays in `RISK_REVIEW` with no job. A production fix would be an
 outbox table, or a sweeper that re-enqueues `RISK_REVIEW` applications older than X minutes. I'll
-document this rather than build it.
+document this rather than build it. A job that BullMQ fails as stalled (more than `maxStalledCount`) never reaches the processor, so that application also stays in `RISK_REVIEW`; the same outbox or sweeper fix covers it.
 
 The simulated provider sits behind an injectable `KybProvider` interface. Tests swap
 in a deterministic fake. Locally, the score is derived from MCC and volume, plus some randomness.

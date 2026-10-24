@@ -1,4 +1,9 @@
 import {
+  DEFAULT_KYB_FAILURE_RATE,
+  DEFAULT_KYB_SCORE_HIGH_MIN,
+  DEFAULT_KYB_SCORE_MEDIUM_MIN,
+  DEFAULT_QUEUE_PREFIX,
+  DEFAULT_REDIS_PORT,
   JWT_SECRET_MIN_DISTINCT_CHARS,
   JWT_SECRET_MIN_LENGTH,
   validateEnv,
@@ -20,6 +25,7 @@ function validRaw(): Record<string, unknown> {
     DB_PASSWORD: FIXTURE,
     DB_NAME: FIXTURE,
     JWT_SECRET: JWT_SECRET_FIXTURE,
+    REDIS_HOST: FIXTURE,
   };
 }
 
@@ -246,6 +252,113 @@ describe('validateEnv', () => {
 
       expect(message).toContain('JWT_SECRET');
       expect(message).not.toContain(sentinel);
+    });
+  });
+
+  describe('Redis, queue and KYB settings', () => {
+    it('applies the defaults', () => {
+      const result = validateEnv(validRaw());
+
+      expect(result.REDIS_HOST).toBe(FIXTURE);
+      expect(result.REDIS_PORT).toBe(DEFAULT_REDIS_PORT);
+      expect(DEFAULT_REDIS_PORT).toBe(6379);
+      expect(result.QUEUE_PREFIX).toBe(DEFAULT_QUEUE_PREFIX);
+      expect(DEFAULT_QUEUE_PREFIX).toBe('bull');
+      expect(result.KYB_WORKER_ENABLED).toBe(true);
+      expect(result.KYB_FAILURE_RATE).toBe(DEFAULT_KYB_FAILURE_RATE);
+      expect(DEFAULT_KYB_FAILURE_RATE).toBe(0.2);
+      expect(result.KYB_SCORE_MEDIUM_MIN).toBe(DEFAULT_KYB_SCORE_MEDIUM_MIN);
+      expect(DEFAULT_KYB_SCORE_MEDIUM_MIN).toBe(40);
+      expect(result.KYB_SCORE_HIGH_MIN).toBe(DEFAULT_KYB_SCORE_HIGH_MIN);
+      expect(DEFAULT_KYB_SCORE_HIGH_MIN).toBe(70);
+    });
+
+    it('parses valid overrides', () => {
+      const result = validateEnv({
+        ...validRaw(),
+        REDIS_PORT: '6380',
+        QUEUE_PREFIX: 'mo-e2e-abc_1',
+        KYB_WORKER_ENABLED: 'false',
+        KYB_SCORE_MEDIUM_MIN: '30',
+        KYB_SCORE_HIGH_MIN: '80',
+      });
+
+      expect(result.REDIS_PORT).toBe(6380);
+      expect(result.QUEUE_PREFIX).toBe('mo-e2e-abc_1');
+      expect(result.KYB_WORKER_ENABLED).toBe(false);
+      expect(result.KYB_SCORE_MEDIUM_MIN).toBe(30);
+      expect(result.KYB_SCORE_HIGH_MIN).toBe(80);
+    });
+
+    it.each([
+      ['0', 0],
+      ['1', 1],
+      ['0.5', 0.5],
+    ])('parses KYB_FAILURE_RATE %p as %p', (value, expected) => {
+      expect(validateEnv({ ...validRaw(), KYB_FAILURE_RATE: value }).KYB_FAILURE_RATE).toBe(
+        expected,
+      );
+    });
+
+    it('falls back to the default QUEUE_PREFIX for an empty string', () => {
+      expect(validateEnv({ ...validRaw(), QUEUE_PREFIX: '' }).QUEUE_PREFIX).toBe('bull');
+    });
+
+    it('denied: throws naming REDIS_HOST when it is missing', () => {
+      const raw = validRaw();
+      delete raw.REDIS_HOST;
+
+      expect(errorMessage(() => validateEnv(raw))).toContain('REDIS_HOST');
+    });
+
+    it('denied: throws naming REDIS_HOST when it is blank', () => {
+      expect(errorMessage(() => validateEnv({ ...validRaw(), REDIS_HOST: '   ' }))).toContain(
+        'REDIS_HOST',
+      );
+    });
+
+    it.each([
+      ['REDIS_PORT', '0'],
+      ['REDIS_PORT', '70000'],
+      ['REDIS_PORT', 'abc'],
+      ['QUEUE_PREFIX', 'a:b'],
+      ['QUEUE_PREFIX', 'p'.repeat(51)],
+      ['KYB_FAILURE_RATE', '-0.1'],
+      ['KYB_FAILURE_RATE', '1.5'],
+      ['KYB_FAILURE_RATE', 'abc'],
+      ['KYB_FAILURE_RATE', 'NaN'],
+      ['KYB_SCORE_MEDIUM_MIN', '101'],
+      ['KYB_SCORE_MEDIUM_MIN', '-1'],
+      ['KYB_SCORE_MEDIUM_MIN', '4.5'],
+      ['KYB_SCORE_HIGH_MIN', '101'],
+      ['KYB_SCORE_HIGH_MIN', '-1'],
+      ['KYB_SCORE_HIGH_MIN', '4.5'],
+    ])('denied: throws naming %s for %p without echoing the value', (name, value) => {
+      const message = errorMessage(() => validateEnv({ ...validRaw(), [name]: value }));
+
+      expect(message).toContain(name);
+      expect(message).not.toContain(value);
+    });
+
+    it('accepts a QUEUE_PREFIX of exactly 50 characters', () => {
+      const prefix = 'p'.repeat(50);
+
+      expect(validateEnv({ ...validRaw(), QUEUE_PREFIX: prefix }).QUEUE_PREFIX).toBe(prefix);
+    });
+
+    it('denied: throws naming KYB_SCORE_HIGH_MIN when MEDIUM_MIN is not below HIGH_MIN', () => {
+      const message = errorMessage(() =>
+        validateEnv({ ...validRaw(), KYB_SCORE_MEDIUM_MIN: '70', KYB_SCORE_HIGH_MIN: '70' }),
+      );
+
+      expect(message).toContain('KYB_SCORE_HIGH_MIN');
+      expect(message).not.toContain('KYB_SCORE_MEDIUM_MIN');
+    });
+
+    it('denied: throws naming KYB_WORKER_ENABLED for a non-boolean value', () => {
+      expect(
+        errorMessage(() => validateEnv({ ...validRaw(), KYB_WORKER_ENABLED: 'yes' })),
+      ).toContain('KYB_WORKER_ENABLED');
     });
   });
 });

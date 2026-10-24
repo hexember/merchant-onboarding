@@ -10,6 +10,7 @@ import { AuditAction, AuditActorType } from '../audit/audit.enums';
 import { AuditLogService } from '../audit/audit-log.service';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
+import { KybCheckQueue } from '../kyb/kyb-check.queue';
 import { UsersRepository } from '../users/users.repository';
 import { ApplicationStatus, KybStatus } from './application.enums';
 import {
@@ -25,8 +26,10 @@ import {
   NewApplication,
 } from './applications.repository';
 import {
+  ApplicationDetailResponseDto,
   ApplicationListResponseDto,
   ApplicationResponseDto,
+  toApplicationDetailResponse,
   toApplicationResponse,
 } from './dto/application-response.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
@@ -58,7 +61,7 @@ function copyField<K extends keyof UpdateApplicationDto>(
   target[key] = source[key];
 }
 
-/** What the submit transaction hands back: the response, plus the inputs of the enqueue seam. */
+/** What the submit transaction hands back: the response, plus the inputs of the KYB enqueue. */
 interface SubmitResult {
   response: ApplicationResponseDto;
   applicationId: string;
@@ -70,7 +73,9 @@ interface SubmitResult {
  * docs/adrs/workflow.md §1.2). Which statuses allow an edit and which transitions exist come from
  * the state machine module (`application-state-machine.ts`). Every read goes through the scoped
  * `ApplicationsRepository`; each write and its audit row share one transaction. Responses are
- * masked by `toApplicationResponse`. Nothing here logs the payload.
+ * masked by `toApplicationResponse` (`toApplicationDetailResponse` for `get`). After a submit
+ * commits, the KYB check job is enqueued through `KybCheckQueue` (docs/adrs/kyb-check.md).
+ * Nothing here logs the payload.
  */
 @Injectable()
 export class ApplicationsService {
@@ -79,6 +84,7 @@ export class ApplicationsService {
     private readonly applicationsRepository: ApplicationsRepository,
     private readonly usersRepository: UsersRepository,
     private readonly auditLogService: AuditLogService,
+    private readonly kybCheckQueue: KybCheckQueue,
   ) {}
 
   async create(dto: CreateApplicationDto, actor: AuthUser): Promise<ApplicationResponseDto> {
@@ -143,12 +149,12 @@ export class ApplicationsService {
     };
   }
 
-  async get(id: string, actor: AuthUser): Promise<ApplicationResponseDto> {
+  async get(id: string, actor: AuthUser): Promise<ApplicationDetailResponseDto> {
     const app = await this.applicationsRepository.findAccessible(id, actor);
     if (app === null) {
       throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
     }
-    return toApplicationResponse(app);
+    return toApplicationDetailResponse(app);
   }
 
   async update(
@@ -200,7 +206,8 @@ export class ApplicationsService {
   /**
    * SUBMIT (docs/adrs/workflow.md §1.2-§1.3): DRAFT or INFO_REQUESTED → RISK_REVIEW. One
    * transaction does the scoped read, the single conditional write (which also resets the KYB
-   * result) and the APPLICATION_SUBMITTED audit row.
+   * result) and the APPLICATION_SUBMITTED audit row. Only after it commits is the KYB check job
+   * enqueued.
    */
   async submit(id: string, actor: AuthUser): Promise<ApplicationResponseDto> {
     // Defence in depth behind @Roles: REVIEWER (or any other role) → 403 before any DB work.
@@ -248,7 +255,10 @@ export class ApplicationsService {
       };
     });
 
-    // After the commit: the kyb-worker item enqueues jobId kyb-check:{applicationId}:{submissionNo} here (docs/adrs/kyb-check.md). Nothing is enqueued yet.
+    // After the commit, never inside the transaction: the worker must see the committed row. The
+    // result is ignored on purpose: `enqueue` never rejects, and the request succeeds even if Redis
+    // is down (the application then stays in RISK_REVIEW; docs/adrs/kyb-check.md trade-off).
+    await this.kybCheckQueue.enqueue(result.applicationId, result.submissionNo);
     return result.response;
   }
 

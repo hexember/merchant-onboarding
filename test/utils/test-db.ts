@@ -15,24 +15,26 @@ export async function createTestDataSource(): Promise<DataSource> {
  *
  * Every spec that calls this (database, auth, seed, audit-log, applications) now also empties
  * merchant_applications: its FKs to users mean Postgres only allows truncating users together
- * with it in one statement.
+ * with it in one statement. kyb_checks has an FK to merchant_applications, so it is emptied in
+ * the same statement too.
  */
 export async function resetTables(dataSource: DataSource): Promise<void> {
   await dataSource.transaction(async (manager) => {
     await manager.query('ALTER TABLE "audit_logs" DISABLE TRIGGER USER');
-    await manager.query('TRUNCATE TABLE "audit_logs", "merchant_applications", "users"');
+    await manager.query('TRUNCATE TABLE "audit_logs", "kyb_checks", "merchant_applications", "users"');
     await manager.query('ALTER TABLE "audit_logs" ENABLE TRIGGER USER');
   });
 }
 
 /**
- * Empties audit_logs and merchant_applications but keeps users, so a spec can insert its users
- * and log in once. Same test-only trigger handling as `resetTables`.
+ * Empties audit_logs, kyb_checks and merchant_applications (one statement: kyb_checks has an FK
+ * to merchant_applications) but keeps users, so a spec can insert its users and log in once. Same
+ * test-only trigger handling as `resetTables`.
  */
 export async function resetApplicationData(dataSource: DataSource): Promise<void> {
   await dataSource.transaction(async (manager) => {
     await manager.query('ALTER TABLE "audit_logs" DISABLE TRIGGER USER');
-    await manager.query('TRUNCATE TABLE "audit_logs", "merchant_applications"');
+    await manager.query('TRUNCATE TABLE "audit_logs", "kyb_checks", "merchant_applications"');
     await manager.query('ALTER TABLE "audit_logs" ENABLE TRIGGER USER');
   });
 }

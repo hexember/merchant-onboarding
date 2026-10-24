@@ -27,7 +27,11 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../common/common.enums';
 import { SWAGGER_BEARER_AUTH_NAME } from '../common/swagger';
 import { ApplicationsService } from './applications.service';
-import { ApplicationListResponseDto, ApplicationResponseDto } from './dto/application-response.dto';
+import {
+  ApplicationDetailResponseDto,
+  ApplicationListResponseDto,
+  ApplicationResponseDto,
+} from './dto/application-response.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
@@ -69,10 +73,13 @@ export class ApplicationsController {
 
   @Get(':id')
   @Roles(UserRole.ADMIN, UserRole.REVIEWER, UserRole.SALES)
-  @ApiOperation({ summary: 'Get one application' })
-  @ApiOkResponse({ type: ApplicationResponseDto })
+  @ApiOperation({ summary: 'Get one application, with its KYB check status' })
+  @ApiOkResponse({ type: ApplicationDetailResponseDto })
   @ApiNotFoundResponse({ description: 'Unknown id or not visible to the caller' })
-  get(@Param('id') id: string, @CurrentUser() actor: AuthUser): Promise<ApplicationResponseDto> {
+  get(
+    @Param('id') id: string,
+    @CurrentUser() actor: AuthUser,
+  ): Promise<ApplicationDetailResponseDto> {
     return this.applicationsService.get(id, actor);
   }
 

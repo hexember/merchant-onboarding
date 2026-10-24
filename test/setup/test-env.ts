@@ -66,12 +66,37 @@ export function ensureTestJwtSecret(
   return generate();
 }
 
-/** Loads .env (a missing file is fine; process env wins) and switches DB_NAME to the test DB. */
+// Every e2e queue prefix starts with this, so a test run never touches the dev queue keys.
+export const TEST_QUEUE_PREFIX_START = 'mo-e2e-';
+
+/**
+ * Returns the QUEUE_PREFIX for the e2e run: an existing value that already starts with `mo-e2e-`
+ * is kept (the second call, after globalSetup, so one run shares one prefix), anything else (unset,
+ * empty, or a dev value such as `bull`) is replaced by a fresh `mo-e2e-<hex>` from `generate`.
+ */
+export function ensureTestQueuePrefix(
+  env: Record<string, string | undefined>,
+  generate: () => string = () => TEST_QUEUE_PREFIX_START + randomBytes(4).toString('hex'),
+): string {
+  const existing = env.QUEUE_PREFIX;
+  if (existing !== undefined && existing.startsWith(TEST_QUEUE_PREFIX_START)) {
+    return existing;
+  }
+  return generate();
+}
+
+/**
+ * Loads .env (a missing file is fine; process env wins), switches DB_NAME to the test DB, uses a
+ * per-run queue prefix and turns the KYB worker off (only the worker spec starts it explicitly).
+ */
 export function applyTestDatabaseEnv(): void {
   config({ quiet: true });
   // A secret from .env or the shell wins. The second call (setupFiles after globalSetup) sees the
   // value already set and keeps it, so one process uses one secret.
   process.env.JWT_SECRET = ensureTestJwtSecret(process.env);
+  process.env.QUEUE_PREFIX = ensureTestQueuePrefix(process.env);
+  // No spec runs a KYB worker unless it starts one, so a submit stays in RISK_REVIEW.
+  process.env.KYB_WORKER_ENABLED = 'false';
   const resolved = resolveTestDatabaseEnv(process.env);
   process.env.DB_NAME = resolved.DB_NAME;
   process.env.DB_NAME_ORIGINAL = resolved.DB_NAME_ORIGINAL;
