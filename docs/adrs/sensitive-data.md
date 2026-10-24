@@ -4,6 +4,10 @@
   A shared `redact()` helper (key-based denylist; a key is redacted when its lowercased name
   contains `password`, `secret`, `token`, `authorization`, `cookie`, `apikey` or `hash`) is applied in the request-logging interceptor,
   in the exception filter and before audit `meta` is written.
+- **Logs:** app code logs through `logInfo` / `logError` (`src/logging/logger.ts`), never
+  `console.*` directly. They run `redact()` and then `maskSensitiveFields()` on `meta`, keep only
+  `name`, `message` and `stack` of an `Error`, and print one JSON line to the terminal. In
+  production they print nothing; a log service is a later task.
 - **Masked in API responses and audit `meta`:** `taxId` and `ownerNationalId` → `••••••1234`
   (last 4), `ownerEmail` → `j•••@example.com`, `ownerPhone` → last 3 digits.
   _(decision)_ After a write, the API never returns these values in full, not even to the owner.

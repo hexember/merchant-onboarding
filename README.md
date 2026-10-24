@@ -43,6 +43,13 @@ overrides that.
 and `SEED_SALES_PASSWORD` in `.env`. It is idempotent: an existing user is skipped and keeps its
 password.
 
+### Logging
+
+Log with `logInfo(context, message, meta)` and `logError(context, message, meta)` from
+`src/logging/logger.ts` instead of `console.*`. Each call prints one JSON line (`logError` to
+stderr). Sensitive keys in `meta` are redacted or masked first; put values in `meta`, never in
+the message. When `NODE_ENV=production`, nothing is printed.
+
 ### Migrations
 
 The schema changes only through migrations in `src/database/migrations/` (`synchronize` is off).
