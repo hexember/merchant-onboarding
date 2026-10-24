@@ -32,6 +32,13 @@ describe('redact', () => {
     'cookie',
     'Set-Cookie',
     'hash',
+    'jwt',
+    'jwtPayload',
+    'bearer',
+    'credentials',
+    'awsCredential',
+    'privateKey',
+    'private_key',
   ])('redacts %p because it contains a denylisted part', (key) => {
     expect(redact({ [key]: 'value', keep: 'ok' })).toEqual({ [key]: REDACTED, keep: 'ok' });
   });
@@ -40,6 +47,37 @@ describe('redact', () => {
     'does not redact %p (masking handles it, or it is not sensitive)',
     (key) => {
       expect(redact({ [key]: 'value' })).toEqual({ [key]: 'value' });
+    },
+  );
+
+  it.each(['authorId', 'pinCode', 'shipping', 'otpSentAt'])(
+    'does not redact %p (bare auth, pin and otp are not denylisted)',
+    (key) => {
+      expect(redact({ [key]: 'value' })).toEqual({ [key]: 'value' });
+    },
+  );
+
+  it.each(['Bearer abc.def', 'bearer abc', 'BEARER\tabc'])(
+    'redacts the bearer-shaped value %p under any key',
+    (value) => {
+      expect(redact({ note: value, nested: [{ header: value }] })).toEqual({
+        note: REDACTED,
+        nested: [{ header: REDACTED }],
+      });
+    },
+  );
+
+  it('redacts a JWT-shaped value under any key', () => {
+    const jwtShaped = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.fake-signature_123';
+
+    expect(redact({ note: jwtShaped, keep: 'ok' })).toEqual({ note: REDACTED, keep: 'ok' });
+    expect(redact(jwtShaped)).toBe(REDACTED);
+  });
+
+  it.each(['eyJ', 'eyJabc', 'eyJa.b', 'Bearer', 'a Bearer token', 'x.eyJa.b.c'])(
+    'leaves the ordinary string %p untouched',
+    (value) => {
+      expect(redact({ note: value })).toEqual({ note: value });
     },
   );
 

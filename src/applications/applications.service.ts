@@ -6,8 +6,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
-import { AuditAction, AuditActorType } from '../audit/audit.enums';
+import {
+  AuditAction,
+  AuditActorType,
+  MERCHANT_APPLICATION_ENTITY_TYPE,
+} from '../audit/audit.enums';
 import { AuditLogService } from '../audit/audit-log.service';
+import { AuditLogQueryService } from '../audit/audit-log-query.service';
+import { AuditLogListResponseDto, toAuditLogResponse } from '../audit/dto/audit-log-response.dto';
 import { AuthUser } from '../auth/auth-user';
 import { UserRole } from '../common/common.enums';
 import { KybCheckQueue } from '../kyb/kyb-check.queue';
@@ -37,12 +43,15 @@ import {
 import { AssignReviewerDto } from './dto/assign-reviewer.dto';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { ListApplicationsQueryDto } from './dto/list-applications-query.dto';
+import { ListAuditLogsQueryDto } from './dto/list-audit-logs-query.dto';
 import { DECISION_TO_ACTION, RecordDecisionDto } from './dto/record-decision.dto';
 import { TransferOwnerDto } from './dto/transfer-owner.dto';
 import { UPDATABLE_FIELDS, UpdateApplicationDto } from './dto/update-application.dto';
 import { MerchantApplication } from './merchant-application.entity';
 
-export const AUDIT_ENTITY_TYPE = 'merchant_application';
+export const AUDIT_ENTITY_TYPE = MERCHANT_APPLICATION_ENTITY_TYPE;
+/** Roles that may read an application's audit history (docs/adrs/auth.md matrix). */
+export const AUDIT_LOG_READ_ROLES: readonly UserRole[] = [UserRole.ADMIN];
 export const DEFAULT_CURRENCY = 'NPR';
 
 export const APPLICATION_NOT_FOUND_MESSAGE = 'Application not found';
@@ -85,8 +94,8 @@ interface SubmitResult {
 
 /**
  * Create, list, read, edit and submit applications, the ADMIN-only `assignReviewer` and
- * `transferOwner`, and the assigned REVIEWER's `decide` (docs/adrs/auth.md matrix,
- * docs/adrs/workflow.md §1.2). Which statuses allow an edit, an assign or a transfer, and which
+ * `transferOwner`, the assigned REVIEWER's `decide`, and the ADMIN-only read-only `listAuditLogs`
+ * (docs/adrs/auth.md matrix, docs/adrs/workflow.md §1.2). Which statuses allow an edit, an assign or a transfer, and which
  * transitions exist, come from the state machine module
  * (`application-state-machine.ts`). Every read goes through the scoped
  * `ApplicationsRepository`; each write and its audit row share one transaction. Responses are
@@ -116,6 +125,7 @@ export class ApplicationsService {
     private readonly usersRepository: UsersRepository,
     private readonly auditLogService: AuditLogService,
     private readonly kybCheckQueue: KybCheckQueue,
+    private readonly auditLogQueryService: AuditLogQueryService,
   ) {}
 
   async create(dto: CreateApplicationDto, actor: AuthUser): Promise<ApplicationResponseDto> {
@@ -468,6 +478,39 @@ export class ApplicationsService {
       );
       return toApplicationResponse(await this.reReadInTransaction(app.id, actor, manager));
     });
+  }
+
+  /**
+   * ADMIN audit history of one application, oldest first. Order: role (403, before any DB work)
+   * → scoped read (404; a malformed id is a miss without a query) → one page of audit rows for
+   * the id the scoped read returned (never the raw path value). Read-only: no transaction, no
+   * audit row, nothing logged. Each item is an allow-list with `meta` sanitised again on read
+   * (`toAuditLogResponse`).
+   */
+  async listAuditLogs(
+    id: string,
+    query: ListAuditLogsQueryDto,
+    actor: AuthUser,
+  ): Promise<AuditLogListResponseDto> {
+    // Defence in depth behind @Roles: SALES and REVIEWER → 403 before any DB work.
+    if (!AUDIT_LOG_READ_ROLES.includes(actor.role)) {
+      throw new ForbiddenException();
+    }
+    const app = await this.applicationsRepository.findAccessible(id, actor);
+    if (app === null) {
+      throw new NotFoundException(APPLICATION_NOT_FOUND_MESSAGE);
+    }
+    const { items, total } = await this.auditLogQueryService.findApplicationHistoryPage(
+      app.id,
+      query.page,
+      query.limit,
+    );
+    return {
+      items: items.map(toAuditLogResponse),
+      page: query.page,
+      limit: query.limit,
+      total,
+    };
   }
 
   /**

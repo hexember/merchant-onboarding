@@ -4,7 +4,11 @@ import { ConfigService } from '@nestjs/config';
 import { Job } from 'bullmq';
 import { DataSource } from 'typeorm';
 import { ApplicationStatus } from '../applications/application.enums';
-import { AuditAction, AuditActorType } from '../audit/audit.enums';
+import {
+  AuditAction,
+  AuditActorType,
+  MERCHANT_APPLICATION_ENTITY_TYPE,
+} from '../audit/audit.enums';
 import { AuditLogService, buildAuditMeta } from '../audit/audit-log.service';
 import { AppEnv } from '../config/env.validation';
 import { logError, logInfo } from '../logging/logger';
@@ -20,8 +24,6 @@ import {
   KybWorkerApplication,
   KybWorkerApplicationsRepository,
 } from './kyb-worker-applications.repository';
-
-const AUDIT_ENTITY_TYPE = 'merchant_application';
 
 /** What one job run concluded. Every outcome is an ack; failures are thrown instead. */
 export type KybJobOutcome = 'invalid' | 'stale' | 'already-done' | 'completed';
@@ -224,7 +226,7 @@ export class KybCheckProcessor extends WorkerHost implements OnApplicationBootst
           actorType: AuditActorType.SYSTEM,
           actorLabel: KYB_WORKER_LABEL,
           action: AuditAction.KYB_CHECK_COMPLETED,
-          entityType: AUDIT_ENTITY_TYPE,
+          entityType: MERCHANT_APPLICATION_ENTITY_TYPE,
           entityId: application.id,
           meta: {
             submissionNo,
@@ -252,7 +254,7 @@ export class KybCheckProcessor extends WorkerHost implements OnApplicationBootst
         actorType: AuditActorType.SYSTEM,
         actorLabel: KYB_WORKER_LABEL,
         action: AuditAction.KYB_CHECK_ATTEMPT_FAILED,
-        entityType: AUDIT_ENTITY_TYPE,
+        entityType: MERCHANT_APPLICATION_ENTITY_TYPE,
         entityId: applicationId,
         meta: failMeta,
       });
@@ -285,7 +287,7 @@ export class KybCheckProcessor extends WorkerHost implements OnApplicationBootst
             actorType: AuditActorType.SYSTEM,
             actorLabel: KYB_WORKER_LABEL,
             action: AuditAction.KYB_CHECK_ATTEMPT_FAILED,
-            entityType: AUDIT_ENTITY_TYPE,
+            entityType: MERCHANT_APPLICATION_ENTITY_TYPE,
             entityId: applicationId,
             meta: failMeta,
           },
@@ -298,7 +300,7 @@ export class KybCheckProcessor extends WorkerHost implements OnApplicationBootst
               actorType: AuditActorType.SYSTEM,
               actorLabel: KYB_WORKER_LABEL,
               action: AuditAction.KYB_CHECK_FAILED,
-              entityType: AUDIT_ENTITY_TYPE,
+              entityType: MERCHANT_APPLICATION_ENTITY_TYPE,
               entityId: applicationId,
               meta: { submissionNo, attempts: attempt },
             },
