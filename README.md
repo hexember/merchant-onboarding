@@ -103,6 +103,17 @@ The pipeline stops and asks a person when the tree is dirty, the plan conflicts 
 review doesn't converge, or the quality gate keeps failing. It never merges or pushes to `main`.
 Requires an authenticated `gh` CLI.
 
+`/ship --stack <base-branch> <task>` cuts the branch from `<base-branch>` instead of `main` and
+opens the PR against it, so PRs can be stacked.
+
+### Working through the backlog
+
+[docs/backlog.md](docs/backlog.md) lists the remaining work in order. `/ship-next` ships the first
+unchecked item as a draft PR stacked on the previous one and records the branch and PR in the
+backlog. `/loop /ship-next` repeats that until the backlog is done or an item needs a person;
+questions, defaults it chose and manual steps collect under "Waiting on you". Review and merge
+the stack from the bottom up; GitHub retargets the next PR when its base merges.
+
 ## Design & decisions
 
 Design decisions live in [docs/adrs/](docs/adrs/):
